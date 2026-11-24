@@ -698,6 +698,13 @@ from 7-18 ms toward the read's time, the helper's `oneios-display: 10 s: ... fro
 under 1 ms, and its new `posted mean Z ms ... after the read's answer` (the buffer wait and fill, now off the guest's
 path); the `frame:` line's "the helper's answer". Not run on the phone.
 
+**Scanout row reads (2026-11-24; not measured on the S24 Ultra).** `Snapshot::update` now calls the guest-memory
+walker once for each full scanline, then hashes up to 24 smaller tiles from that cached row (60 pixels each at the
+S24 Ultra's 1440-pixel width; four tiles remain for small frames). The previous path revisited the row's segment list
+for each of its four tiles. This lowers repeated mapping-table traversal and makes localized buffer updates narrower;
+it still scans every guest row and does not remove the CPU copy. The next phone measurement is the existing
+`oneios-display: 10 s` read timing alongside xnuhost's `frame:` stages; no new timing-only instrumentation was added.
+
 ## 3. Tests on the PC
 
 `cd runtime && cargo test -p xnuhost -p drm2kgsl-sys` (also part of `runtime/host-tests.sh` and `runtime/build.sh

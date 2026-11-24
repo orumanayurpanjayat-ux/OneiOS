@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: MIT
-//! The helper's own copy of the guest's frame (B,G,R,X), and the hash of each of its tiles: the picture the layer is
-//! to show, which every post fills its buffer from. [`Snapshot::update`] reads the guest's pages once, right when a
-//! frame comes: each tile of each row into `row` (one tile, in the cache), hashed there, and copied on into `pixels`
-//! only when its hash differs from the tile's last one. So the hash always says what the snapshot holds (it is never
-//! of guest bytes read at another moment than those copied), and the guest's pages are read in one pass of about
-//! 2-3 ms (the hash used to be one pass and the copy of the changed tiles a second; 5.2-6.0 ms mean, up to 21 ms, on
-//! the phone). Each row is cut into TILES tiles; a tile's hash is of its pixels' B,G,R bytes (not X), with the tile's
-//! width. `full`: every pixel is the newest picture's (the first update or put of the whole frame makes it so).
+//! The helper's own copy of the guest's frame (B,G,R,X), and the hash of each tile: the picture the layer is to show,
+//! which every post fills its buffer from. [`Snapshot::update`] reads each guest row once into `row`, hashes the
+//! tiles from that stable copy, and copies a tile into `pixels` only when its hash differs. The hash therefore always
+//! describes the bytes copied into the snapshot. Wide frames use up to 24 horizontal tiles (60 pixels at the S24
+//! Ultra's 1440-pixel width); small frames keep the original four-tile layout. A tile's hash covers B,G,R, not X.
+//! `full`: every pixel is the newest picture's (the first update or put of the whole frame makes it so).
 use super::direct::Direct;
 use super::protocol::FrameRef;
 use super::{Rect, FORMAT_BGRX};
@@ -14,6 +12,8 @@ use crate::sys::{Errno, Result};
 use xh_core::bytes::le;
 
 pub const TILES: u32 = 4;
+const WIDE_TILES: u32 = 24;
+const WIDE_WIDTH: u32 = 256;
 
 pub struct Snapshot {
     pixels: Vec<u8>,
@@ -23,6 +23,7 @@ pub struct Snapshot {
     pub width: u32,
     pub height: u32,
     pub tile: u32,
+    tiles_x: u32,
     pub full: bool,
 }
 
@@ -41,15 +42,17 @@ impl Snapshot {
             return Err(Errno(libc::ENOMEM));
         }
         let stride = width as usize * 4;
-        let tile = width.div_ceil(TILES);
+        let tile = if width >= WIDE_WIDTH { width.div_ceil(WIDE_TILES) } else { width.div_ceil(TILES) };
+        let tiles_x = width.div_ceil(tile);
         Ok(Snapshot {
             pixels: zeroed(height as usize * stride)?,
-            row: zeroed(tile as usize * 4)?,
-            hash: zeroed(height as usize * TILES as usize)?,
+            row: zeroed(stride)?,
+            hash: zeroed(height as usize * tiles_x as usize)?,
             stride,
             width,
             height,
             tile,
+            tiles_x,
             full: false,
         })
     }
@@ -58,9 +61,10 @@ impl Snapshot {
         &self.pixels
     }
 
-    /// Reads the pending direct frame into the snapshot. The bounding rectangle of the tiles that differ from the
-    /// snapshot's (empty: the frame is what the snapshot holds already), and the error of Direct::copy_direct's kind:
-    /// the tiles read before the fault are in the snapshot (the rectangle says which), the rest are as they were.
+    /// Reads each complete row of the pending direct frame once, then hashes and copies its changed tiles from the
+    /// row scratch. Returns the bounding rectangle of changed tiles (empty: the snapshot already holds the frame) and
+    /// an error of Direct::copy_direct's kind. Rows completed before a fault are in the snapshot; the incomplete row
+    /// is ignored.
     pub fn update(&mut self, d: &Direct) -> (Rect, Result<()>) {
         let mut k = match d.walk() {
             Ok(k) => k,
@@ -71,26 +75,29 @@ impl Snapshot {
         let (mut x0, mut x1, mut y0, mut y1) = (u32::MAX, 0, u32::MAX, 0);
         let mut result = Ok(());
         'rows: for row in 0..height {
-            for t in 0..TILES {
+            // Read the scanout segments once per row, rather than re-walking them for every tile. Do not publish a
+            // partial row if a segment is invalid or the pending slot was reused mid-read.
+            let read = &mut self.row[..width as usize * 4];
+            if let Err(e) = k.row_into(row, 0, read) {
+                result = Err(e);
+                break 'rows;
+            }
+            for t in 0..self.tiles_x {
                 let x = t * self.tile;
                 let w = if x >= width { 0 } else { (width - x).min(self.tile) };
                 if w == 0 {
                     continue;
                 }
-                // The guest's bytes are read once, into `row`; the hash and the copy are both of what was read.
-                let read = &mut self.row[..w as usize * 4];
-                if let Err(e) = k.row_into(row, x, read) {
-                    result = Err(e);
-                    break 'rows;
-                }
-                let h = hash_tile(read, w);
-                let slot = &mut self.hash[row as usize * TILES as usize + t as usize];
+                let at = x as usize * 4;
+                let tile_bytes = &read[at..at + w as usize * 4];
+                let h = hash_tile(tile_bytes, w);
+                let slot = &mut self.hash[row as usize * self.tiles_x as usize + t as usize];
                 if *slot == h {
                     continue;
                 }
                 *slot = h;
-                let at = row as usize * self.stride + x as usize * 4;
-                self.pixels[at..at + read.len()].copy_from_slice(read);
+                let to = row as usize * self.stride + at;
+                self.pixels[to..to + tile_bytes.len()].copy_from_slice(tile_bytes);
                 x0 = x0.min(x);
                 x1 = x1.max(x + w);
                 y0 = y0.min(row);
@@ -119,9 +126,9 @@ impl Snapshot {
             let to = row as usize * self.stride + r.x as usize * 4;
             let from = row as usize * f.stride as usize + r.x as usize * 4;
             self.pixels[to..to + bytes].copy_from_slice(&f.pixels[from..from + bytes]);
-            let last = ((r.x + r.w - 1) / self.tile).min(TILES - 1);
+            let last = ((r.x + r.w - 1) / self.tile).min(self.tiles_x - 1);
             for t in r.x / self.tile..=last {
-                self.hash[row as usize * TILES as usize + t as usize] = 0;
+                self.hash[row as usize * self.tiles_x as usize + t as usize] = 0;
             }
         }
         if r == Rect::whole(self.width, self.height) {

@@ -122,8 +122,8 @@ NDK's `ANativeWindow` on that `Surface`, from the mapped memfd straight into the
   (the boot console, 2D resources): it is put into the snapshot too. A frame that cannot be read (a slot reused, a
   segment outside RAM, no snapshot: half-float frames or no memory for it) is answered with the failure flag and
   xnuhost copies the frames itself from then on. The guest flushes its whole surface every frame, so the helper finds
-  the damage itself: each tile of the frame is read once into the cache, hashed there and copied on into the snapshot
-  only when its hash differs ("The snapshot" below). An unchanged frame is answered at once and nothing is posted. A
+  the damage itself: each scanline is read once into the cache, then its tiles are hashed there and copied into the snapshot
+  only when their hashes differ ("The snapshot" below). An unchanged frame is answered at once and nothing is posted. A
   changed one: the layer's buffer is locked whole and the helper fills from the snapshot what that buffer lacks ("The
   layer's buffers" below). Protocol: `docs/booter.md` 2.8. Every 10 s the log has `10 s: N frames from xnuhost, U
   unchanged (nothing posted), P posted (M from guest RAM, C% of the rows changed, F% filled); guest pages read in one
@@ -277,27 +277,26 @@ extended sRGB: components below 0 and above 1), white at 1.0, white at 2.0. What
   to in the layer mean 10.4-11.5 ms, 0 not answered within 100 ms. A sign of wrong offsets: 100% of the rows
   copied in every frame on a still screen. Whether answering the flush after the post slows the guest's swaps is
   not measured yet.
-- **The snapshot (2026-11-22).** The helper's own copy of the picture (`Snapshot`, `src/xhd/snapshot.rs`, 18 MB at 1440x3120
-  and one hash per tile, made before the first post), which every post is filled from. A direct frame is read into
-  it in one pass right when it comes (`Snapshot::update`): each tile of each row (4 a row) is copied from the
-  guest's pages into a one-tile buffer, hashed there, and copied on only when its hash differs. So the hash always
-  says what the snapshot holds, and the guest's pages are read once. Before, the hash read all 18 MB and then the
-  changed tiles were read a second time (from 2026-11-22 morning; before that, after the buffer wait): `guest pages
-  read for mean 5.2-6.0 ms, max 8.6-21.2 ms` on the phone. xnuhost's own pixels (the memfd) are put over it
+- **The snapshot (2026-11-22; row-read optimization 2026-11-24).** The helper's own copy of the picture (`Snapshot`,
+  `src/xhd/snapshot.rs`, 18 MB at 1440x3120 and one hash per tile, made before the first post), which every post is
+  filled from. A direct frame is read into it when it comes (`Snapshot::update`): each scanline is copied from the
+  guest's pages into a full-row scratch buffer once, then divided into tiles and hashed from that same copy. A changed
+  tile is copied into the snapshot only when its hash differs. So the hash always says what the snapshot holds and a
+  failed partial row cannot publish mixed data. At 1440 pixels wide the helper now uses 24 tiles of 60 pixels each;
+  small frames keep the original four-tile layout. This avoids repeated segment-table walks within each row and narrows
+  the changed rectangle for localized updates. The change has not been measured on the S24 Ultra yet.
+  Before the 2026-11-22 one-pass change, the hash read all 18 MB and then changed tiles were read a second time:
+  `guest pages read for mean 5.2-6.0 ms, max 8.6-21.2 ms` on the phone. The earlier one-pass version measured on the
+  build host (Apple M4, in the host tests' container, `-O2`, a 1440x3120 frame of stride 5888 in scattered 16 KiB
+  pages) at 3.2-3.3 ms a frame where the old hash and copy cost 9.2-9.3 ms (unchanged frame), and 3.6-4.7 ms against
+  9.3-10.2 ms with 30% of the rows changed. Those are measurements of the earlier one-pass implementation, not this
+  row-read change; the phone's line is still needed for a result. xnuhost's own pixels (the memfd) are put over it
   (`Snapshot::put`), and their tiles lose their hashes, so the next direct frame takes them from the guest again.
   The 10 s line says how long the read took and how long after xnuhost's send it began (`from X ms after xnuhost
-  sent the frame`: `XHDS`'s fifth word is the send time since 2026-11-22). On the build host (Apple M4, in the
-  host tests' container, `-O2`, a 1440x3120 frame of stride 5888 in scattered 16 KiB pages) the one pass costs
-  3.2-3.3 ms a frame where the old hash and copy cost 9.2-9.3 ms (unchanged frame), and 3.6-4.7 ms against 9.3-10.2
-  ms with 30% of the rows changed: about a third. The phone was not measured yet. If the ratio holds there, the
-  phone's 5.2-6.0 ms become about 2 ms, about 25% of a core when a frame comes every 120 Hz refresh (a guess until
-  the phone's line). The guest does not draw into
-  a frame's surface while the helper reads it. Its display driver lands the frame in flight (waits for the flush's
-  answer, which xnuhost holds until `done`) before it posts the next one (`DroidVMVirtioGpuDisplay.cpp`, `land()`),
-  and the compositor needs that next swap to free the surface again. The first-read delay on the phone checks this.
-  Tests: `src/xhd/tests.rs` (from `test_display.c`; the first update copies all of it, an unchanged frame nothing, a changed pixel its tile,
-  the X byte alone no change, the guest's write after the read stays out until the next read, a put tile is taken
-  from the guest again, a fault halfway keeps what was read, a reused slot reads nothing).
+  sent the frame`: `XHDS`'s fifth word is the send time since 2026-11-22). The guest does not draw into a frame's
+  surface while the helper reads it. Its display driver lands the frame in flight (waits for the flush's answer, which
+  xnuhost holds until `done`) before it posts the next one (`DroidVMVirtioGpuDisplay.cpp`, `land()`), and the
+  compositor needs that next swap to free the surface again.
 - **The layer's buffers (2026-11-22): the fix of "when the UI changes it glitches and updates".** Until then the
   helper locked only the changed tiles' rectangle and left the rest to Surface's copy-back. AOSP's `Surface::lock`
   (`libs/gui/Surface.cpp`) copies back `mDirtyRegion - dirty` from the last posted buffer and keeps `mDirtyRegion`
