@@ -35,6 +35,12 @@ You don't need to understand the whole stack. Follow the probe record:
    a maintainer's eye.
 5. **Prove it like the S24.** SpringBoard on the panel, touch, return to One UI intact. Post the session log lines
    that prove each one (the `oneios-*` lines, not "it felt fast").
+6. **Track it.** Put your fork and phone on the iOSOnAnd tracker (<https://hackios.appaiproxy.com>), where every
+   port's per-area status is public. With Claude Code in this repo, run `/track OWNER/REPO DEVICE-SLUG` once
+   (`.claude/skills/track/SKILL.md`): it signs you in with a GitHub gist proof (no token is sent), claims your repo
+   for your phone and records each area from your docs and logs. After that, the agent updates an area's status
+   itself whenever a phone boot proves or breaks it (CLAUDE.md, "The iOSOnAnd tracker"). By hand, the same steps
+   are in that skill file. Claim only what your logs show.
 
 Stuck? Open a draft PR early with the probe tarball's summary — a half-port with facts beats a finished port
 with guesses. And read [docs/forks.md](docs/forks.md) first: someone may already have your device halfway done.
