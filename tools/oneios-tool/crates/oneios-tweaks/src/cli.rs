@@ -193,6 +193,17 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// check that an S24 image has a target-matched Metal bundle or runtime NGPUADD2 addon before copying images
+    MetalPreflight {
+        device: String,
+        build: String,
+        #[arg(long = "metal-plugin", value_name = "BUNDLE")]
+        metal_plugin: Option<PathBuf>,
+        #[arg(long = "runtime-addon", value_name = "FILE")]
+        runtime_addon: Option<PathBuf>,
+        #[arg(long = "allow-no-metal")]
+        allow_no_metal: bool,
+    },
 }
 
 fn fail(e: anyhow::Error) -> i32 {
@@ -313,6 +324,18 @@ pub fn run(args: &[String]) -> i32 {
                 Ok(())
             };
             match run() {
+                Ok(()) => 0,
+                Err(e) => fail(e),
+            }
+        }
+        Command::MetalPreflight { device, build, metal_plugin, runtime_addon, allow_no_metal } => {
+            match hook::preflight_metal_with_addon(
+                &device,
+                &build,
+                metal_plugin.as_deref(),
+                runtime_addon.as_deref(),
+                allow_no_metal,
+            ) {
                 Ok(()) => 0,
                 Err(e) => fail(e),
             }

@@ -326,7 +326,7 @@ fn session_file(name: &str, content: &str) {
 
 /// A whole file of at most `limit` bytes (None: unreadable, empty or larger). Not xh_core::fs::read_bytes, which cuts
 /// a larger file at its limit: a kernel, a device tree or an identity file cut short must be refused.
-fn read_file(path: &str, limit: usize) -> Option<Vec<u8>> {
+pub(crate) fn read_file(path: &str, limit: usize) -> Option<Vec<u8>> {
     let f = std::fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
     if len == 0 || len > limit as u64 {

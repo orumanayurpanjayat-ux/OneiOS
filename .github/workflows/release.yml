@@ -171,13 +171,13 @@ jobs:
           d=$(mktemp -d); zstd -dc out/release/oneios-runtime-$VERSION-arm64.tar.zst | tar -x -C "$d"
           runtime/package/elf-check.sh "$d"
       - name: The package holds the runtime's own folders only
-        # runtime.json, NOTICE, LICENSE, bin/, lib/, scripts/, kernel/xnu.macho and its record: nothing of the
-        # fork's tree (app/) or any other part of the checkout.
+        # runtime.json, NOTICE, LICENSE, bin/, lib/, scripts/, kernel/xnu.macho and its record, and an optional
+        # kernel/gpuaddon with its CDHashes and target: nothing of the fork's tree (app/) or the image.
         run: |
           set -euo pipefail
           a=out/release/oneios-runtime-$VERSION-arm64.tar.zst
           ( cd out/release && sha256sum -c "$(basename "$a").sha256" )
-          zstd -dc "$a" | tar -t | tee members.txt | grep -Ev '^(runtime\.json|NOTICE|LICENSE|(bin|lib|scripts)/[^/].*|kernel/xnu\.macho(\.build\.json)?)$' && { echo "::error::the package has members outside the runtime's folders (above)"; exit 1; }
+          zstd -dc "$a" | tar -t | tee members.txt | grep -Ev '^(runtime\.json|NOTICE|LICENSE|(bin|lib|scripts)/[^/].*|kernel/xnu\.macho(\.build\.json)?|kernel/gpuaddon(\.cdhashes|\.target)?)$' && { echo "::error::the package has members outside the runtime's folders (above)"; exit 1; }
           [ "$(head -n 1 members.txt)" = runtime.json ] || { echo "::error::runtime.json is not the first member"; exit 1; }
           echo "$(wc -l < members.txt) members, runtime.json first"
       - name: The phone's oneios-tool is the package's bin/oneios-tool, stripped, with its .sha256

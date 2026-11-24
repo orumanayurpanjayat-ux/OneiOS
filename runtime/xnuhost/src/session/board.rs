@@ -557,19 +557,39 @@ impl Session {
         }
         let ramdisk = sidecar(&config.kernel, "ramdisk", 1 << 30);
         let mut trust = sidecar(&config.kernel, "trustcache", 16 << 20);
-        let addon = sidecar(&config.kernel, "gpuaddon", 64 << 20);
+        // The image's own addon is the phone's choice and wins. The runtime fallback is accepted only for this image's
+        // exact guest target; its CDHashes are added to the trust cache this boot gives the kernel.
+        let addon = match sidecar(&config.kernel, "gpuaddon", 64 << 20) {
+            Some(blob) => Some(crate::addon::Addon { blob, cdhashes: Vec::new() }),
+            None => self.image_set.as_ref().and_then(|set| {
+                let target = format!("iPhone18,2 {}", set.build);
+                crate::addon::runtime_addon(&config.runtime, &target)
+            }),
+        };
         let policies = sidecar(&config.kernel, "vroot", 128 << 20);
-        // Apple's trust caches of the set (IM4P) and the owner module, as the sidecar the kernel takes, unless one is
-        // shipped.
-        if let Some(set) =
-            self.image_set.as_ref().filter(|s| trust.is_none() && s.find("trust/static.trustcache").is_some())
-        {
-            let blob = set.trustcaches().map_err(|e| {
-                loge!("trust caches of {}: {}", config.image, e);
-                BootFailed
-            })?;
-            logi!("trust caches: {} modules from the image set, {} bytes", blob[0], blob.len());
-            trust = Some(blob);
+        // Apple's trust caches of the set plus its owner module. When the kernel brought a trust-cache sidecar, keep
+        // those modules and append the image's owner module (runtime-addon CDHashes included) instead of silently
+        // leaving addon binaries outside the trust cache.
+        if let Some(set) = self.image_set.as_ref() {
+            let extra: &[[u8; 20]] = addon.as_ref().map_or(&[], |a| &a.cdhashes);
+            let has_owner = set.find("overlay/userland/owner-trust.json").is_some();
+            if let Some(existing) = trust.as_deref() {
+                if has_owner || !extra.is_empty() {
+                    let blob = set.trustcaches_with_addon(existing, extra).map_err(|e| {
+                        loge!("trust caches of {}: {}", config.image, e);
+                        BootFailed
+                    })?;
+                    logi!("trust caches: {} modules (kernel sidecar + image owner), {} bytes", blob[0], blob.len());
+                    trust = Some(blob);
+                }
+            } else if set.find("trust/static.trustcache").is_some() {
+                let blob = set.trustcaches_trusting(extra).map_err(|e| {
+                    loge!("trust caches of {}: {}", config.image, e);
+                    BootFailed
+                })?;
+                logi!("trust caches: {} modules from the image set, {} bytes", blob[0], blob.len());
+                trust = Some(blob);
+            }
         }
         // The root: the OS volume, matched by its APFS volume UUID.
         machine.root_volume_uuid = self
@@ -646,7 +666,7 @@ impl Session {
             legacy_boot_args: config.legacy_boot_args,
             ramdisk: ramdisk.as_deref(),
             trustcache: trust.as_deref(),
-            gpu_addon: addon.as_deref(),
+            gpu_addon: addon.as_ref().map(|a| a.blob.as_slice()),
             root_policies: policies.as_deref(),
         };
         // SAFETY: the kernel's window, `window` bytes mapped at m.host (mem::map), is the guest's RAM; no vCPU runs yet

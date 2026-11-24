@@ -1223,7 +1223,8 @@ scripts/setup/get-references.sh         # NativeMetal, NativeAdreno, AdrenoPM4, 
 rustup toolchain install 1.98.0 && rustup +1.98.0 component add rust-src
 # macOS: brew install ninja glslang shaderc spirv-tools bison llvm; uv pip install --python "$(command -v python3)" meson mako pyyaml
 scripts/bg.sh metal userland/metal/build.sh
-# -> out/userland/NativeAdrenoMetal.bundle, NativeAdrenoMetal.build.json, NativeAdrenoMetal.check.txt, NativeAdrenoMetal.gpuaddon
+# -> out/userland/NativeAdrenoMetal.bundle, NativeAdrenoMetal.build.json, NativeAdrenoMetal.check.txt,
+#    NativeAdrenoMetal.gpuaddon plus .cdhashes and .target
 # The bridge on metal2vulkan-rt instead (userland/metal/rt/README.md), in out/metal-rt and out/userland-rt:
 rustup toolchain install nightly-2026-11-03 && rustup component add rust-src --toolchain nightly-2026-11-03
 scripts/bg.sh metal-rt env METAL_RUNTIME=rt userland/metal/build.sh    # bg.sh passes no METAL_RUNTIME of its own
@@ -1232,11 +1233,17 @@ userland/metal/rt/build.sh test        # rt's unit tests on the pin with userlan
 ```
 
 Then rebuild the image set (section 1): the hook places the bundle and lists its CDHashes. For the S24 Ultra
-(`iPhone18,2`), the built-in hook now stops before the large image copy if the bundle or its build record is missing
-or targets another build, so a successful image build cannot silently omit Metal. Build the plugin before the image;
-for a deliberate CPU-only fallback, set `ONEIOS_ALLOW_NO_METAL=1` on the image build, which explicitly skips bundle
-placement. What the build does, what was changed for the iPhone's shared cache and what is verified:
+(`iPhone18,2`), the built-in hook stops before the large image copy if neither the bundle nor a validated, matching
+runtime addon is available, so a successful image build cannot silently omit Metal. Build the plugin before the image;
+for a deliberate CPU-only fallback, set `ONEIOS_ALLOW_NO_METAL=1` on the image build. What the build does, what was
+changed for the iPhone's shared cache and what is verified:
 [gpu.md](gpu.md) section 7.
+
+The manual [metal-plugin workflow](../.github/workflows/metal-plugin.yml) produces the runtime addon and both sidecars.
+Pass that addon to `runtime/package.sh` as `ONEIOS_GPUADDON=...`; the resulting runtime can carry the matching S24
+Metal plugin without rebuilding it into each image set. Image setup validates its `iPhone18,2 <build>` target,
+NGPUADD2 contents and CDHash list before it allows an image without an embedded bundle. At boot, xnuhost uses the
+image's explicit addon if present, otherwise the matching runtime addon, and adds its CDHashes to the trust cache.
 
 ## 10. Rust tools (`oneios-tool`)
 

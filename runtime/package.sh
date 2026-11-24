@@ -25,7 +25,8 @@
 # (ONEIOS_TOOL_ANDROID=PATH names a phone oneios-tool built elsewhere; CARGO_TARGET_DIR is honoured).
 # Env: ANDROID_NDK_ROOT (default $HOME/Android/Sdk/ndk/28.2.13676358, on macOS $HOME/Library/Android/sdk/ndk/...;
 #      the revision is checked; runtime/build.sh gets it as NDK unless NDK is set), ANDROID_API (35),
-#      KERNEL_DIR, OUT_DIR (out/release; a relative one is taken from the current folder), SOURCE_DATE_EPOCH (default: the commit time),
+#      KERNEL_DIR, ONEIOS_GPUADDON (NGPUADD2 sidecar plus .cdhashes and .target), OUT_DIR (out/release; a relative one
+#      is taken from the current folder), SOURCE_DATE_EPOCH (default: the commit time),
 #      PACKAGE_EXTRA_DIR (a folder copied into the package as it is; used by the tests).
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -161,6 +162,47 @@ elif [ -f "$KERNEL_DIR/xnu.macho" ]; then
   echo "package: kernel $(sed -n 's/.*"build_id": *"\([^"]*\)".*/\1/p' "$STAGE/kernel/xnu.macho.build.json")"
 else
   echo "package: no kernel at $KERNEL_DIR (runtime only)"
+fi
+
+# 3b. A built Metal add-on rides with the matching kernel/runtime. The target sidecar keeps image setup from accepting
+# a plug-in built for another guest build; the CDHashes are used to extend the image set's trust cache at boot.
+if [ -n "${ONEIOS_GPUADDON:-}" ]; then
+  addon=$ONEIOS_GPUADDON
+  [ "$HAVE_KERNEL" = 1 ] ||
+    { echo "package: ONEIOS_GPUADDON needs a kernel in the package (kernel/gpuaddon is its sidecar)" >&2; exit 1; }
+  [ -f "$addon" ] && [ -f "$addon.cdhashes" ] && [ -f "$addon.target" ] ||
+    { echo "package: $addon and its .cdhashes and .target sidecars are needed" >&2; exit 1; }
+  [ "$(head -c 8 "$addon")" = NGPUADD2 ] ||
+    { echo "package: $addon is not a boot addon (NGPUADD2): make one with oneios-tool ios addon" >&2; exit 1; }
+  addon_bytes=$(wc -c < "$addon" | tr -d ' ')
+  [ "$addon_bytes" -le $((64 << 20)) ] ||
+    { echo "package: $addon is $addon_bytes bytes, over xnuhost's 64 MiB limit for the boot addon" >&2; exit 1; }
+  addon_total=$(od -An -tu8 -j16 -N8 "$addon" | tr -d ' ')
+  [ "$addon_total" = "$addon_bytes" ] ||
+    { echo "package: $addon header size $addon_total does not match its $addon_bytes bytes" >&2; exit 1; }
+  target_lines=$(wc -l < "$addon.target" | tr -d ' ')
+  [ "$target_lines" = 1 ] && [ "$(wc -c < "$addon.target" | tr -d ' ')" -le 256 ] ||
+    { echo "package: $addon.target must be one short target line" >&2; exit 1; }
+  read -r target_device target_build target_extra < "$addon.target" || true
+  [ "$target_device" = "iPhone18,2" ] && [ -n "$target_build" ] && [ -z "${target_extra:-}" ] ||
+    { echo "package: $addon.target must name iPhone18,2 and one build id" >&2; exit 1; }
+  addon_hashes=0
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    word=${line%%[[:space:]]*}
+    [ "${#word}" = 40 ] && [ -z "$(printf '%s' "$word" | tr -d '0123456789abcdefABCDEF')" ] ||
+      { echo "package: $addon.cdhashes: ${line%% *} is not a 40-digit CDHash" >&2; exit 1; }
+    addon_hashes=$((addon_hashes + 1))
+  done < "$addon.cdhashes"
+  [ "$addon_hashes" -gt 0 ] ||
+    { echo "package: $addon.cdhashes lists no CDHash: the plug-in's code would not be trusted" >&2; exit 1; }
+  "$ONEIOS_TOOL" image tweaks metal-preflight "$target_device" "$target_build" --runtime-addon "$addon" >/dev/null ||
+    { echo "package: $addon is not a complete, trusted Metal addon for $target_device $target_build" >&2; exit 1; }
+  cp "$addon" "$STAGE/kernel/gpuaddon"
+  cp "$addon.cdhashes" "$STAGE/kernel/gpuaddon.cdhashes"
+  cp "$addon.target" "$STAGE/kernel/gpuaddon.target"
+  chmod 0644 "$STAGE/kernel/gpuaddon" "$STAGE/kernel/gpuaddon.cdhashes" "$STAGE/kernel/gpuaddon.target"
+  echo "package: boot addon $addon_bytes bytes, $addon_hashes CDHashes, target $target_device $target_build"
 fi
 
 # 4. Notices.

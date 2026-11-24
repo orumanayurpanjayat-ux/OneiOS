@@ -886,6 +886,7 @@ fn tweaks(rq: &Rq) -> Result<Done, Fail> {
         device,
         helpers: helpers.map(Into::into),
         metal_plugin: metal_plugin.map(Into::into),
+        runtime_addon: None,
         allow_no_metal,
         camera_plugin: camera_plugin.map(Into::into),
         scale: scale.map(|s| s.to_string()),
@@ -1198,6 +1199,10 @@ fn make_image(rq: &Rq) -> Result<Done, Fail> {
     let tweak = oneios_imagebuild::Tweak {
         helpers: read_opt("helpers")?,
         metal_plugin: read_opt("metal_plugin")?,
+        runtime_addon: {
+            let path = format!("{stage}/runtime/kernel/gpuaddon");
+            std::path::Path::new(&path).is_file().then_some(path)
+        },
         allow_no_metal: std::env::var("ONEIOS_ALLOW_NO_METAL").map_or(false, |value| value == "1"),
         camera_plugin: read_opt("camera_plugin")?,
         scale: rq.req.opt_str("scale")?,

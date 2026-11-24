@@ -35,6 +35,8 @@ pub struct Hook {
     pub helpers: Option<PathBuf>,
     /// the Metal plug-in bundle: placed when it is a folder; its target and build record are checked against the image
     pub metal_plugin: Option<PathBuf>,
+    /// A runtime-carried NGPUADD2 sidecar. It is a fallback only when its target matches this image.
+    pub runtime_addon: Option<PathBuf>,
     /// explicit escape hatch for an intentionally CPU-only S24 Ultra image (ONEIOS_ALLOW_NO_METAL=1)
     pub allow_no_metal: bool,
     /// the capture plug-in's folder: used when it holds H9ISP.mediacapture
@@ -98,6 +100,7 @@ impl Hook {
             device: env("ONEIOS_DEVICE").filter(|d| !d.is_empty()),
             helpers: given("ONEIOS_HELPERS", "out/userland/helpers"),
             metal_plugin: given("ONEIOS_METAL_PLUGIN", "out/userland/NativeAdrenoMetal.bundle"),
+            runtime_addon: env("ONEIOS_RUNTIME_GPUADDON").filter(|s| !s.is_empty()).map(PathBuf::from),
             allow_no_metal: env("ONEIOS_ALLOW_NO_METAL").is_some_and(|value| value == "1"),
             camera_plugin: given("ONEIOS_CAMERA_PLUGIN", "out/userland/camera"),
             scale: env("ONEIOS_SCALE").filter(|s| !s.is_empty()),
@@ -122,10 +125,23 @@ fn metal_plugin_to_place(h: &Hook) -> Option<&Path> {
 
 /// Validate the target-specific Metal input before an image build does expensive work.
 pub fn preflight_metal(device: &str, build: &str, plugin: Option<&Path>, allow_no_metal: bool) -> Result<()> {
+    preflight_metal_with_addon(device, build, plugin, None, allow_no_metal)
+}
+
+/// Validate the target-specific Metal inputs before an image build does expensive work. A runtime addon is accepted
+/// only when its target sidecar, archive structure, Metal files and CDHash list all agree.
+pub fn preflight_metal_with_addon(
+    device: &str,
+    build: &str,
+    plugin: Option<&Path>,
+    runtime_addon: Option<&Path>,
+    allow_no_metal: bool,
+) -> Result<()> {
     let h = Hook {
         device: Some(device.to_string()),
         build: Some(build.to_string()),
         metal_plugin: plugin.map(Path::to_path_buf),
+        runtime_addon: runtime_addon.map(Path::to_path_buf),
         allow_no_metal,
         ..Hook::default()
     };
@@ -149,14 +165,115 @@ fn validate_metal_target(expected: &str, bundle: &str, record: Option<&str>) -> 
     Ok(())
 }
 
+fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(at..at.checked_add(4)?)?.try_into().ok()?))
+}
+
+fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(bytes.get(at..at.checked_add(8)?)?.try_into().ok()?))
+}
+
+fn align8(n: usize) -> Option<usize> {
+    n.checked_add(7).map(|v| v & !7)
+}
+
+/// Check an NGPUADD2 addon without inflating its zlib members. The kernel performs the full decompression at boot;
+/// image setup checks that the container is structurally complete and actually carries the Metal bundle.
+fn addon_has_metal(blob: &[u8]) -> bool {
+    if blob.len() < 24 || blob.len() > 64 << 20 || blob.get(..8) != Some(b"NGPUADD2".as_slice())
+        || u64_at(blob, 16) != Some(blob.len() as u64)
+    {
+        return false;
+    }
+    let Some(count) = u32_at(blob, 8).map(|n| n as usize).filter(|n| (1..=4096).contains(n)) else { return false };
+    let mut at = 24usize;
+    let mut executable = false;
+    let mut vulkan = false;
+    let mut publish = false;
+    for _ in 0..count {
+        let (Some(name_len), Some(_mode), Some(_size), Some(packed_len)) = (
+            u32_at(blob, at).map(|n| n as usize),
+            u32_at(blob, at.checked_add(4).unwrap_or(usize::MAX)),
+            u64_at(blob, at.checked_add(8).unwrap_or(usize::MAX)),
+            u64_at(blob, at.checked_add(16).unwrap_or(usize::MAX)).and_then(|n| usize::try_from(n).ok()),
+        ) else { return false };
+        if !(2..=160).contains(&name_len) { return false; }
+        let Some(header_end) = at.checked_add(24) else { return false };
+        let Some(name_end) = header_end.checked_add(align8(name_len).unwrap_or(usize::MAX)) else { return false };
+        let Some(name_bytes) = blob.get(header_end..header_end + name_len - 1) else { return false };
+        if blob.get(header_end + name_len - 1) != Some(&0) { return false; }
+        let Ok(name) = std::str::from_utf8(name_bytes) else { return false };
+        executable |= name == "addons/NativeAdrenoMetal.bundle/NativeAdrenoMetal";
+        vulkan |= name == "addons/NativeAdrenoMetal.bundle/libvulkan_freedreno.dylib";
+        publish |= name == "addons/NativeAdrenoMetal.publish";
+        let Some(compressed_end) = name_end.checked_add(align8(packed_len).unwrap_or(usize::MAX)) else { return false };
+        if compressed_end > blob.len() { return false; }
+        at = compressed_end;
+    }
+    at == blob.len() && executable && vulkan && publish
+}
+
+fn runtime_addon_matches(path: &Path, expected: &str) -> bool {
+    let sidecar = |suffix: &str| {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".");
+        name.push(suffix);
+        PathBuf::from(name)
+    };
+    let target_path = sidecar("target");
+    if std::fs::metadata(&target_path).map_or(true, |m| m.len() > 256) {
+        return false;
+    }
+    let Ok(target) = std::fs::read_to_string(&target_path) else { return false };
+    if target.lines().count() != 1 || target.trim() != expected {
+        return false;
+    }
+    let Ok(metadata) = std::fs::metadata(path) else { return false };
+    if !(24..=(64 << 20)).contains(&metadata.len()) {
+        return false;
+    }
+    let Ok(blob) = std::fs::read(path) else { return false };
+    if !addon_has_metal(&blob) {
+        return false;
+    }
+    let hashes_path = sidecar("cdhashes");
+    let Ok(hashes_meta) = std::fs::metadata(&hashes_path) else { return false };
+    if hashes_meta.len() > 1 << 16 {
+        return false;
+    }
+    let Ok(hashes) = std::fs::read_to_string(&hashes_path) else { return false };
+    let mut found_executable = false;
+    let mut found_vulkan = false;
+    let mut count = 0;
+    for line in hashes.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')) {
+        let mut fields = line.split_whitespace();
+        let Some(hash) = fields.next() else { return false };
+        let Some(name) = fields.next() else { return false };
+        if hash.len() != 40 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return false;
+        }
+        found_executable |= name == "addons/NativeAdrenoMetal.bundle/NativeAdrenoMetal";
+        found_vulkan |= name == "addons/NativeAdrenoMetal.bundle/libvulkan_freedreno.dylib";
+        count += 1;
+    }
+    count > 0 && found_executable && found_vulkan
+}
+
 /// Refuse an S24 Ultra image that would silently fall back to CPU composition, and refuse a plug-in built for another
 /// image when the profile identity is available. The explicit CPU-only escape is for deliberate fallback builds.
 fn check_metal_target(h: &Hook) -> Result<()> {
     let required = h.device.as_deref() == Some("iPhone18,2") && !h.allow_no_metal;
+    let expected = h.device.as_deref().zip(h.build.as_deref()).map(|(device, build)| format!("{device} {build}"));
+    let runtime_addon = required
+        && metal_plugin_to_place(h).is_none()
+        && h.runtime_addon
+            .as_deref()
+            .zip(expected.as_deref())
+            .is_some_and(|(path, target)| runtime_addon_matches(path, target));
     let Some(plugin) = metal_plugin_to_place(h) else {
-        if required {
+        if required && !runtime_addon {
             bail!(Refused(
-                "image-hook: the S24 Ultra image requires a matching NativeAdrenoMetal.bundle; build it with scripts/bg.sh metal userland/metal/build.sh (set ONEIOS_ALLOW_NO_METAL=1 only for an intentional CPU-only image)".into()
+                "image-hook: the S24 Ultra image requires a matching NativeAdrenoMetal.bundle or a validated runtime kernel/gpuaddon; build the addon with userland/metal/build.sh addon (set ONEIOS_ALLOW_NO_METAL=1 only for an intentional CPU-only image)".into()
             ));
         }
         return Ok(());

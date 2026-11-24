@@ -216,7 +216,8 @@ finish() {
 addon() {
   local bundle=$OUT/NativeAdrenoMetal.bundle
   [ -f "$bundle/NativeAdrenoMetal" ] || { echo "metal: no bundle in $OUT: run the build first" >&2; exit 1; }
-  "$ONEIOS_TOOL" ios gpuaddon "$bundle" "$OUT/NativeAdrenoMetal.gpuaddon"
+  "$ONEIOS_TOOL" ios addon "$OUT/NativeAdrenoMetal.gpuaddon" --metal "$bundle"
+  cp "$bundle/oneios-target" "$OUT/NativeAdrenoMetal.gpuaddon.target"
 }
 
 say "SDK $IOS_SDK_VERSION ($IOS_SDK); stubs $([ -f "$IOS_TBD/usr/lib/libSystem.B.tbd" ] && echo "$IOS_TBD" || echo "none: the SDK's own"); target $IOS_TARGET"

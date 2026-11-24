@@ -1529,6 +1529,12 @@ same command on both; every link is against this guest's own iOS 27 stubs (`out/
 scripts/bg.sh metal userland/metal/build.sh      # stage, turnip, plugin, finish, addon (each also runs alone)
 ```
 
+For a runtime-carried S24 Ultra plugin, run the manual
+[Metal workflow](../.github/workflows/metal-plugin.yml) with target `iPhone18,2 24A446`. Its artifact includes the
+bundle, the `NGPUADD2` addon, `.cdhashes`, and `.target`. `runtime/package.sh` accepts that addon as
+`ONEIOS_GPUADDON=FILE`; the image's own addon still takes precedence, while a matching runtime addon supplies the
+Metal files and their boot trust hashes when an image has no embedded plugin.
+
 **What it builds**, all for `arm64e-apple-ios27.0`:
 
 | Piece | Source | Notes |

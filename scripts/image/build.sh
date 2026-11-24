@@ -18,7 +18,8 @@
 #                          fixture): do not mount the images. With --os-root, apfs-fuse/hdiutil is not needed
 # Env: INPUTS (default inputs/<build>), OUT (default out/image).
 #      ONEIOS_METAL_PLUGIN=DIR overrides the built-in NativeAdrenoMetal bundle path.
-#      ONEIOS_ALLOW_NO_METAL=1 deliberately omits Metal from an S24 Ultra image; otherwise the hook requires an exact bundle.
+#      ONEIOS_RUNTIME_GPUADDON=FILE supplies the runtime's target-matched NGPUADD2 Metal addon.
+#      ONEIOS_ALLOW_NO_METAL=1 deliberately omits Metal from an S24 Ultra image; otherwise a matching bundle or addon is required.
 #      ONEIOS_TOOL=PATH    the image tool's binary. The tool is `oneios-tool image` (tools/oneios-tool, Rust: built when
 #                          it is missing or older than its sources, scripts/lib/oneios-tool.sh). It replaced
 #                          scripts/image/imagetool.py here on 2026-11-13 (the same files, byte for byte:
@@ -114,17 +115,13 @@ if [ "$no_hook" = 0 ]; then
 fi
 
 # Fail before mounting or copying the large OS volumes if the built-in S24 Ultra hook would omit or misplace Metal.
+runtime_addon=${ONEIOS_RUNTIME_GPUADDON:-$ROOT/out/userland/NativeAdrenoMetal.gpuaddon}
 if [ "$no_hook" = 0 ] && [ "$hook" = builtin ] && [ "$P_DEVICE" = "iPhone18,2" ] && [ "${ONEIOS_ALLOW_NO_METAL:-0}" != 1 ]; then
   metal_plugin=${ONEIOS_METAL_PLUGIN:-$ROOT/out/userland/NativeAdrenoMetal.bundle}
-  [ -d "$metal_plugin" ] || die "S24 Ultra image requires $metal_plugin; build it with scripts/bg.sh metal userland/metal/build.sh"
-  [ -f "$metal_plugin/oneios-target" ] || die "Metal bundle has no oneios-target: $metal_plugin"
-  metal_target=$(tr -d '\r\n' < "$metal_plugin/oneios-target")
-  expected_target="$P_DEVICE $P_BUILD"
-  [ "$metal_target" = "$expected_target" ] || die "Metal bundle targets '$metal_target', expected '$expected_target'; rebuild with ONEIOS_METAL_TARGET='$expected_target'"
-  metal_record=${metal_plugin%.bundle}.build.json
-  [ -f "$metal_record" ] || die "Metal bundle has no build record: $metal_record"
-  metal_record_target=$("$ONEIOS_TOOL" json get "$metal_record" target) || die "Metal build record has no target: $metal_record"
-  [ "$metal_record_target" = "$expected_target" ] || die "Metal build record targets '$metal_record_target', expected '$expected_target'; rebuild the bundle"
+  metal_preflight=("$ONEIOS_TOOL" image tweaks metal-preflight "$P_DEVICE" "$P_BUILD")
+  [ -d "$metal_plugin" ] && metal_preflight+=(--metal-plugin "$metal_plugin")
+  [ -f "$runtime_addon" ] && metal_preflight+=(--runtime-addon "$runtime_addon")
+  "${metal_preflight[@]}" || die "S24 Ultra Metal preflight failed; provide a matching bundle or runtime addon"
 fi
 
 mounts=()
@@ -202,6 +199,7 @@ if [ -n "$hook" ]; then
   : > "$WORK/hook-info.json"
   ONEIOS_HOOK_API=1 ONEIOS_PROFILE=$(cd "$(dirname "$profile")" && pwd)/$(basename "$profile") \
   ONEIOS_BUILD=$P_BUILD ONEIOS_VERSION=$P_VERSION ONEIOS_DEVICE=$P_DEVICE ONEIOS_BOARD=$P_BOARD \
+  ONEIOS_RUNTIME_GPUADDON=$runtime_addon \
   ONEIOS_INPUTS=$IN ONEIOS_OS_ROOT=$os_root ONEIOS_SYSTEMOS_ROOT=$sys_root ONEIOS_APP_ROOT=$app_root \
   ONEIOS_DATA=$WORK/data ONEIOS_OVERLAY=$WORK/overlay ONEIOS_OWNERS=$WORK/owners.tsv \
   ONEIOS_INFO=$WORK/hook-info.json ONEIOS_EPOCH=$P_EPOCH ONEIOS_DATA_UUID=$P_DATA_UUID \

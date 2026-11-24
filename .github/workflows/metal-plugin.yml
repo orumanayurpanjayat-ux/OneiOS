@@ -1,0 +1,75 @@
+name: metal-plugin
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'The guest to build for: "<product> <build>" (userland/metal/hooks/<product>-<build>.json)'
+        required: true
+        default: 'iPhone18,2 24A446'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore executable bits
+        run: git ls-files -z | xargs -0 grep -lZI '^#!' 2>/dev/null | xargs -0 -r chmod +x
+      - name: Xcode with the iPhoneOS SDK
+        run: |
+          set -euo pipefail
+          pick=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$pick" ]; then sudo xcode-select -s "$pick/Contents/Developer"; fi
+          xcodebuild -version
+          sdk=$(xcrun --sdk iphoneos --show-sdk-path)
+          ver=$(sed -n 's/.*"Version" *: *"\([0-9.]*\)".*/\1/p' "$sdk/SDKSettings.json" | head -1)
+          case "$ver" in 2[7-9]*|[3-9][0-9]*) min=27.0 ;; *) min=${ver%.*}; [ -n "$min" ] || min=26.0 ;; esac
+          echo "iPhoneOS SDK: $sdk ($ver), deployment target $min"
+          echo "IOS_MIN=$min" >> "$GITHUB_ENV"
+          echo "IOS_TARGET=arm64e-apple-ios$min" >> "$GITHUB_ENV"
+      - name: Homebrew build tools
+        run: brew install ninja glslang shaderc spirv-tools bison llvm
+      - name: Python tools
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install --quiet --upgrade pip
+          "$RUNNER_TEMP/py/bin/pip" install --quiet meson mako pyyaml
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+      - name: Rust 1.98.0 with rust-src
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup +1.98.0 component add rust-src
+          cargo +1.98.0 --version
+      - name: Pinned sources
+        run: |
+          set -euo pipefail
+          kernel/fetch.sh Droid-VM-UniXNU
+          scripts/setup/get-references.sh NativeMetal NativeAdreno NativeMobileDisplay AdrenoPM4 metal2vulkan mesa-droidvm
+          scripts/setup/get-references.sh -l
+      - name: iOS toolchain report
+        run: scripts/setup/ios-toolchain.sh || true
+      - name: Build the bundle and GPU addon
+        env:
+          ONEIOS_METAL_TARGET: ${{ inputs.target }}
+          JOBS: '6'
+        run: set -euo pipefail; userland/metal/build.sh all 2>&1 | tee metal-build.log
+      - name: Record outputs
+        if: always()
+        run: '{ ls -l out/userland 2>/dev/null || true; cat out/userland/NativeAdrenoMetal.build.json 2>/dev/null || true; } | tee -a metal-build.log'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: NativeAdrenoMetal
+          if-no-files-found: warn
+          path: |
+            out/userland/NativeAdrenoMetal.bundle
+            out/userland/NativeAdrenoMetal.gpuaddon
+            out/userland/NativeAdrenoMetal.gpuaddon.cdhashes
+            out/userland/NativeAdrenoMetal.gpuaddon.target
+            out/userland/NativeAdrenoMetal.build.json
+            out/userland/NativeAdrenoMetal.runtime
+            out/userland/NativeAdrenoMetal.check.txt
+            metal-build.log

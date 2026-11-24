@@ -503,6 +503,12 @@ impl ImageSet {
     /// xh_imageset_trustcaches: DarwinBoot's sidecar (u32 count, u32 offsets[count], version 2 modules) from the set's
     /// three IM4P trust caches and, when overlay/userland/owner-trust.json lists CDHashes, one owner module.
     pub fn trustcaches(&self) -> Result<Vec<u8>, Error> {
+        self.trustcaches_trusting(&[])
+    }
+
+    /// `trustcaches` with the CDHashes of a runtime-carried boot addon. An image set made without Metal has no
+    /// owner-trust.json entries for that addon, so its hashes must join the owner module for this boot.
+    pub fn trustcaches_trusting(&self, extra: &[[u8; 20]]) -> Result<Vec<u8>, Error> {
         const NAMES: [&str; 3] = ["trust/static.trustcache", "trust/system.trustcache", "trust/app.trustcache"];
         let mut modules: Vec<Vec<u8>> = Vec::new();
         for (i, name) in NAMES.iter().enumerate() {
@@ -525,7 +531,7 @@ impl ImageSet {
             }
             modules.push(module.to_vec());
         }
-        if let Some(owner) = self.owner_module()? {
+        if let Some(owner) = self.owner_module(extra)? {
             modules.push(owner);
         }
         let mut out = Vec::new();
@@ -544,23 +550,59 @@ impl ImageSet {
         Ok(out)
     }
 
-    /// The owner module: version 2, a UUID derived from its content, the CDHashes of overlay/userland/owner-trust.json
-    /// sorted, each as a SHA-256 hash (type 2) with no flags. None for a set without the userland overlay or with no
-    /// CDHashes.
-    fn owner_module(&self) -> Result<Option<Vec<u8>>, Error> {
-        const OWNER: &str = "overlay/userland/owner-trust.json";
-        if self.find(OWNER).is_none() {
-            return Ok(None); // a set without the userland overlay
+    /// Add the image's owner module (including runtime-addon CDHashes) to an already supplied DarwinBoot trust-cache
+    /// sidecar. A kernel may ship one of its own, in which case replacing it with only the image's caches would drop
+    /// that module and leaving it unchanged would make the addon fail AMFI.
+    pub fn trustcaches_with_addon(&self, existing: &[u8], extra: &[[u8; 20]]) -> Result<Vec<u8>, Error> {
+        if !xnuloader::boot::trustcaches_valid(existing) {
+            return Err("the kernel's trust-cache sidecar is not a valid DarwinBoot trust-cache list");
         }
-        let json = self.listed(OWNER, 4 << 20)?;
-        let j = Json(&json);
+        let Some(owner) = self.owner_module(extra)? else { return Ok(existing.to_vec()) };
+        let count = le::u32(existing, 0) as usize;
+        let mut modules = Vec::with_capacity(count + 1);
+        for i in 0..count {
+            let start = le::u32(existing, 4 + i * 4) as usize;
+            let end = if i + 1 < count { le::u32(existing, 8 + i * 4) as usize } else { existing.len() };
+            modules.push(existing[start..end].to_vec());
+        }
+        modules.push(owner);
+        let mut out = Vec::new();
+        out.extend_from_slice(&(modules.len() as u32).to_le_bytes());
+        let mut at = 4 + modules.len() * 4;
+        for module in &modules {
+            out.extend_from_slice(&(at as u32).to_le_bytes());
+            at += module.len();
+        }
+        for module in &modules {
+            out.extend_from_slice(module);
+        }
+        if !xnuloader::boot::trustcaches_valid(&out) {
+            return Err("the merged trust caches do not make a sidecar the loader takes");
+        }
+        Ok(out)
+    }
+
+    /// The owner module: version 2, a UUID derived from its content, the CDHashes of overlay/userland/owner-trust.json
+    /// and of the runtime's boot addon sorted, each as a SHA-256 hash (type 2) with no flags.
+    fn owner_module(&self, extra: &[[u8; 20]]) -> Result<Option<Vec<u8>>, Error> {
+        const OWNER: &str = "overlay/userland/owner-trust.json";
         let mut entries: Vec<[u8; 24]> = Vec::new();
-        for e in j.elements(j.get(Some(0), "cdhashes")) {
-            let mut entry = [0u8; 24];
-            let text = j.str(Some(e), 48);
-            if !text.is_some_and(|t| hex_bytes(&t, &mut entry[..20])) {
-                return Err("owner-trust.json: a CDHash is not 40 hex digits");
+        if self.find(OWNER).is_some() {
+            let json = self.listed(OWNER, 4 << 20)?;
+            let j = Json(&json);
+            for e in j.elements(j.get(Some(0), "cdhashes")) {
+                let mut entry = [0u8; 24];
+                let text = j.str(Some(e), 48);
+                if !text.is_some_and(|t| hex_bytes(&t, &mut entry[..20])) {
+                    return Err("owner-trust.json: a CDHash is not 40 hex digits");
+                }
+                entry[20] = 2;
+                entries.push(entry);
             }
+        }
+        for hash in extra {
+            let mut entry = [0u8; 24];
+            entry[..20].copy_from_slice(hash);
             entry[20] = 2;
             entries.push(entry);
         }
