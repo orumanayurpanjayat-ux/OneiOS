@@ -1231,8 +1231,12 @@ userland/metal/rt/build.sh check       # laptop tools: m2v-rt-check, abi_smoke (
 userland/metal/rt/build.sh test        # rt's unit tests on the pin with userland/metal/rt/patches
 ```
 
-Then rebuild the image set (section 1): the hook places the bundle and lists its two CDHashes. What the build does,
-what was changed for the iPhone's shared cache and what is verified: [gpu.md](gpu.md) section 7.
+Then rebuild the image set (section 1): the hook places the bundle and lists its CDHashes. For the S24 Ultra
+(`iPhone18,2`), the built-in hook now stops before the large image copy if the bundle or its build record is missing
+or targets another build, so a successful image build cannot silently omit Metal. Build the plugin before the image;
+for a deliberate CPU-only fallback, set `ONEIOS_ALLOW_NO_METAL=1` on the image build, which explicitly skips bundle
+placement. What the build does, what was changed for the iPhone's shared cache and what is verified:
+[gpu.md](gpu.md) section 7.
 
 ## 10. Rust tools (`oneios-tool`)
 

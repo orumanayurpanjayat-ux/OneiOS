@@ -851,6 +851,9 @@ fn tweaks(rq: &Rq) -> Result<Done, Fail> {
     };
     let (helpers, metal_plugin, camera_plugin, config) = (optional("helpers")?, optional("metal_plugin")?, optional("camera_plugin")?, optional("config")?);
     let build = rq.req.opt_str("build")?;
+    let device = rq.req.opt_str("device")?.filter(|device| !device.is_empty())
+        .or_else(|| std::env::var("ONEIOS_DEVICE").ok().filter(|device| !device.is_empty()));
+    let allow_no_metal = std::env::var("ONEIOS_ALLOW_NO_METAL").map_or(false, |value| value == "1");
     let scale = rq.req.opt_u64("scale")?;
     let args = rq.req.list("args")?;
     let owners = match rq.req.opt_str("owners")? {
@@ -880,8 +883,10 @@ fn tweaks(rq: &Rq) -> Result<Done, Fail> {
         data: data.clone().into(),
         overlay: overlay.into(),
         build,
+        device,
         helpers: helpers.map(Into::into),
         metal_plugin: metal_plugin.map(Into::into),
+        allow_no_metal,
         camera_plugin: camera_plugin.map(Into::into),
         scale: scale.map(|s| s.to_string()),
         config: config.map(Into::into),
@@ -1193,6 +1198,7 @@ fn make_image(rq: &Rq) -> Result<Done, Fail> {
     let tweak = oneios_imagebuild::Tweak {
         helpers: read_opt("helpers")?,
         metal_plugin: read_opt("metal_plugin")?,
+        allow_no_metal: std::env::var("ONEIOS_ALLOW_NO_METAL").map_or(false, |value| value == "1"),
         camera_plugin: read_opt("camera_plugin")?,
         scale: rq.req.opt_str("scale")?,
         config: read_opt("tweaks_config")?,

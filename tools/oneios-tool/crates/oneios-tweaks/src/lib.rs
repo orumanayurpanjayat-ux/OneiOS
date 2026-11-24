@@ -22,7 +22,7 @@ pub mod tree;
 pub mod tweaks;
 
 pub use apply::{apply, Applied, Apply};
-pub use hook::{run_hook, Hook, HookDone};
+pub use hook::{preflight_metal, run_hook, Hook, HookDone};
 pub use tweaks::Options;
 
 use oneios_common::job;

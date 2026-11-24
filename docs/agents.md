@@ -87,10 +87,11 @@ Ask the owner of a file before changing it; tell the lead when you land somethin
 
 - tweaks-port (2026-11-21) -> image-build (your `tweaks_port()`), the app: **the root tweaks are in the tool**,
   crate `tools/oneios-tool/crates/oneios-tweaks` (README "image tweaks"), and `serve`'s `tweaks` runs them. The call:
-  `oneios_tweaks::run_hook(&oneios_tweaks::Hook { os_root, os_image, data, overlay, build, helpers, metal_plugin,
-  camera_plugin, scale, config, args, owners, info }) -> anyhow::Result<oneios_tweaks::HookDone>` (`src/hook.rs`).
+  `oneios_tweaks::run_hook(&oneios_tweaks::Hook { os_root, os_image, data, overlay, build, device, helpers, metal_plugin,
+  allow_no_metal, camera_plugin, scale, config, args, owners, info }) -> anyhow::Result<oneios_tweaks::HookDone>` (`src/hook.rs`).
   The fields are hook API 1's variables: `data` = `ONEIOS_DATA` (changed in place), `overlay` (files go to
-  `overlay/userland/`), `owners` (appended), `info` (written), `build: Option<String>`, `scale: Option<String>` ("2"
+  `overlay/userland/`), `owners` (appended), `info` (written), `build: Option<String>`, `device: Option<String>` (target identity),
+  `allow_no_metal: bool` (explicit CPU-only S24 Ultra fallback), `scale: Option<String>` ("2"
   or "3"), `helpers`/`metal_plugin`/`camera_plugin: Option<PathBuf>` (used when they are what image-hook wants),
   `args: Vec<String>` (more `apply` options). **The volumes as images:** `os_image: Some(PathBuf)` reads the OS
   volume's raw image with `oneios_image::apfs` (block 0's state, the first volume; `args` `--root-volume N|NAME`

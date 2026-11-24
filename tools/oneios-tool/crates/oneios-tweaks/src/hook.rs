@@ -29,10 +29,14 @@ pub struct Hook {
     pub overlay: PathBuf,
     /// ONEIOS_BUILD: the build, where SystemVersion.plist has none
     pub build: Option<String>,
+    /// ONEIOS_DEVICE: image target, used to reject a mismatched Metal bundle
+    pub device: Option<String>,
     /// signed guest helpers (userland/helpers/build.sh's output): used when it is a folder
     pub helpers: Option<PathBuf>,
-    /// the Metal plug-in bundle: placed when it is a folder; NAME.build.json beside it is checked when it is there
+    /// the Metal plug-in bundle: placed when it is a folder; its target and build record are checked against the image
     pub metal_plugin: Option<PathBuf>,
+    /// explicit escape hatch for an intentionally CPU-only S24 Ultra image (ONEIOS_ALLOW_NO_METAL=1)
+    pub allow_no_metal: bool,
     /// the capture plug-in's folder: used when it holds H9ISP.mediacapture
     pub camera_plugin: Option<PathBuf>,
     /// ONEIOS_SCALE: the UI scale, "2" or "3" (as the environment gives it)
@@ -91,8 +95,10 @@ impl Hook {
             data,
             overlay,
             build: env("ONEIOS_BUILD").filter(|b| !b.is_empty()),
+            device: env("ONEIOS_DEVICE").filter(|d| !d.is_empty()),
             helpers: given("ONEIOS_HELPERS", "out/userland/helpers"),
             metal_plugin: given("ONEIOS_METAL_PLUGIN", "out/userland/NativeAdrenoMetal.bundle"),
+            allow_no_metal: env("ONEIOS_ALLOW_NO_METAL").is_some_and(|value| value == "1"),
             camera_plugin: given("ONEIOS_CAMERA_PLUGIN", "out/userland/camera"),
             scale: env("ONEIOS_SCALE").filter(|s| !s.is_empty()),
             config: None,
@@ -107,8 +113,90 @@ fn path_text(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
+fn metal_plugin_to_place(h: &Hook) -> Option<&Path> {
+    if h.device.as_deref() == Some("iPhone18,2") && h.allow_no_metal {
+        return None;
+    }
+    h.metal_plugin.as_deref().filter(|p| is_dir(p))
+}
+
+/// Validate the target-specific Metal input before an image build does expensive work.
+pub fn preflight_metal(device: &str, build: &str, plugin: Option<&Path>, allow_no_metal: bool) -> Result<()> {
+    let h = Hook {
+        device: Some(device.to_string()),
+        build: Some(build.to_string()),
+        metal_plugin: plugin.map(Path::to_path_buf),
+        allow_no_metal,
+        ..Hook::default()
+    };
+    check_metal_target(&h)
+}
+
+fn validate_metal_target(expected: &str, bundle: &str, record: Option<&str>) -> Result<()> {
+    if bundle.trim() != expected {
+        bail!(Refused(format!(
+            "image-hook: Metal bundle targets {:?}, but this image is {expected}; rebuild it with ONEIOS_METAL_TARGET='{expected}'",
+            bundle.trim()
+        )));
+    }
+    if let Some(record) = record {
+        if record != expected {
+            bail!(Refused(format!(
+                "image-hook: Metal build record targets {record}, but this image is {expected}; rebuild the bundle for this profile"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse an S24 Ultra image that would silently fall back to CPU composition, and refuse a plug-in built for another
+/// image when the profile identity is available. The explicit CPU-only escape is for deliberate fallback builds.
+fn check_metal_target(h: &Hook) -> Result<()> {
+    let required = h.device.as_deref() == Some("iPhone18,2") && !h.allow_no_metal;
+    let Some(plugin) = metal_plugin_to_place(h) else {
+        if required {
+            bail!(Refused(
+                "image-hook: the S24 Ultra image requires a matching NativeAdrenoMetal.bundle; build it with scripts/bg.sh metal userland/metal/build.sh (set ONEIOS_ALLOW_NO_METAL=1 only for an intentional CPU-only image)".into()
+            ));
+        }
+        return Ok(());
+    };
+    let (Some(device), Some(build)) = (h.device.as_deref(), h.build.as_deref()) else {
+        if required {
+            bail!(Refused("image-hook: cannot verify the S24 Ultra Metal target without ONEIOS_DEVICE and ONEIOS_BUILD".into()));
+        }
+        return Ok(());
+    };
+    let expected = format!("{device} {build}");
+    let target_path = plugin.join("oneios-target");
+    if !is_file(&target_path) {
+        if required {
+            bail!(Refused(format!(
+                "image-hook: {} has no oneios-target file; rebuild the Metal bundle for {expected}",
+                plugin.display()
+            )));
+        }
+        return Ok(());
+    }
+    let bundle_target = std::fs::read_to_string(&target_path).with_context(|| target_path.display().to_string())?;
+    let record_path = plugin.with_extension("build.json");
+    let record_target = if is_file(&record_path) {
+        json::load(&record_path)?.get("target").and_then(Value::as_str).map(str::to_owned)
+    } else {
+        None
+    };
+    if required && record_target.is_none() {
+        bail!(Refused(format!(
+            "image-hook: {} is missing its Metal build record; rebuild it with userland/metal/build.sh",
+            record_path.display()
+        )));
+    }
+    validate_metal_target(&expected, &bundle_target, record_target.as_deref())
+}
+
 /// The hook: `apply --layout sealed` and the rest of image-hook, with the same files as it leaves.
 pub fn run_hook(h: &Hook) -> Result<HookDone> {
+    check_metal_target(h)?;
     let out = h.overlay.join("userland");
     let mut argv: Vec<String> = vec!["--layout".into(), "sealed".into()];
     match &h.os_image {
@@ -122,7 +210,7 @@ pub fn run_hook(h: &Hook) -> Result<HookDone> {
     if let Some(helpers) = h.helpers.as_ref().filter(|p| is_dir(p)) {
         argv.extend(["--helpers".into(), path_text(helpers)]);
     }
-    if let Some(plugin) = h.metal_plugin.as_ref().filter(|p| is_dir(p)) {
+    if let Some(plugin) = metal_plugin_to_place(h) {
         argv.extend(["--metal-plugin".into(), path_text(plugin)]);
     }
     if let Some(camera) = h.camera_plugin.as_ref().filter(|p| is_file(&p.join("H9ISP.mediacapture"))) {

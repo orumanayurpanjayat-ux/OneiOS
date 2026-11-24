@@ -17,6 +17,8 @@
 #                          the volumes' files are already readable here (mounted by other means, or a
 #                          fixture): do not mount the images. With --os-root, apfs-fuse/hdiutil is not needed
 # Env: INPUTS (default inputs/<build>), OUT (default out/image).
+#      ONEIOS_METAL_PLUGIN=DIR overrides the built-in NativeAdrenoMetal bundle path.
+#      ONEIOS_ALLOW_NO_METAL=1 deliberately omits Metal from an S24 Ultra image; otherwise the hook requires an exact bundle.
 #      ONEIOS_TOOL=PATH    the image tool's binary. The tool is `oneios-tool image` (tools/oneios-tool, Rust: built when
 #                          it is missing or older than its sources, scripts/lib/oneios-tool.sh). It replaced
 #                          scripts/image/imagetool.py here on 2026-11-13 (the same files, byte for byte:
@@ -109,6 +111,20 @@ if [ "$no_hook" = 0 ]; then
   else
     hook=builtin
   fi
+fi
+
+# Fail before mounting or copying the large OS volumes if the built-in S24 Ultra hook would omit or misplace Metal.
+if [ "$no_hook" = 0 ] && [ "$hook" = builtin ] && [ "$P_DEVICE" = "iPhone18,2" ] && [ "${ONEIOS_ALLOW_NO_METAL:-0}" != 1 ]; then
+  metal_plugin=${ONEIOS_METAL_PLUGIN:-$ROOT/out/userland/NativeAdrenoMetal.bundle}
+  [ -d "$metal_plugin" ] || die "S24 Ultra image requires $metal_plugin; build it with scripts/bg.sh metal userland/metal/build.sh"
+  [ -f "$metal_plugin/oneios-target" ] || die "Metal bundle has no oneios-target: $metal_plugin"
+  metal_target=$(tr -d '\r\n' < "$metal_plugin/oneios-target")
+  expected_target="$P_DEVICE $P_BUILD"
+  [ "$metal_target" = "$expected_target" ] || die "Metal bundle targets '$metal_target', expected '$expected_target'; rebuild with ONEIOS_METAL_TARGET='$expected_target'"
+  metal_record=${metal_plugin%.bundle}.build.json
+  [ -f "$metal_record" ] || die "Metal bundle has no build record: $metal_record"
+  metal_record_target=$("$ONEIOS_TOOL" json get "$metal_record" target) || die "Metal build record has no target: $metal_record"
+  [ "$metal_record_target" = "$expected_target" ] || die "Metal build record targets '$metal_record_target', expected '$expected_target'; rebuild the bundle"
 fi
 
 mounts=()

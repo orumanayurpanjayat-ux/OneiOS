@@ -279,6 +279,12 @@ Data seed, a file in `overlay/`, or kernel policy. Hook API 1:
 | `ONEIOS_OWNERS` | file to append owner rules to: `PATH<tab>UID<tab>GID<tab>MODE` and an optional `<tab>R` for the whole tree below. `PATH` is relative to `ONEIOS_DATA`, `MODE` octal or `-` |
 | `ONEIOS_INFO` | file to write one JSON value to; it becomes `tweaks.info` in the manifest |
 | `ONEIOS_EPOCH`, `ONEIOS_DATA_UUID` | the profile's `[data]` values |
+| `ONEIOS_ALLOW_NO_METAL=1` | explicitly allow an intentionally CPU-only image for the S24 Ultra; otherwise the built-in hook requires its matching Metal bundle |
+
+For `ONEIOS_DEVICE=iPhone18,2`, the built-in hook requires `NativeAdrenoMetal.bundle`, checks the bundle's
+`oneios-target` and adjacent `NativeAdrenoMetal.build.json` against `<device> <build>`, and stops before replacing
+the image set if the bundle is missing or mismatched. Set `ONEIOS_ALLOW_NO_METAL=1` only when CPU composition is
+intentional. `--no-hook` / `--no-tweaks` still explicitly skips the hook.
 
 `oneios-tool image tweaks hook` also reads `ONEIOS_OS_IMAGE`: the OS volume's raw image, read with the tool's own
 APFS reader instead of the mounted `ONEIOS_OS_ROOT` (the phone mounts nothing; the same seed). The hooks read only

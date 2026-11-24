@@ -159,11 +159,12 @@ impl Prelink {
 }
 
 /// The root tweaks' optional inputs (hook API 1's `ONEIOS_HELPERS`, `ONEIOS_METAL_PLUGIN`, `ONEIOS_CAMERA_PLUGIN`,
-/// `ONEIOS_SCALE`, `ONEIOS_ROOTTWEAK_ARGS`; `config`: another `userland/config`, else the one built into the tool).
+/// `ONEIOS_SCALE`, `ONEIOS_ROOTTWEAK_ARGS`, `ONEIOS_ALLOW_NO_METAL`; `config`: another `userland/config`, else the one built into the tool).
 #[derive(Debug, Clone, Default)]
 pub struct Tweak {
     pub helpers: Option<String>,
     pub metal_plugin: Option<String>,
+    pub allow_no_metal: bool,
     pub camera_plugin: Option<String>,
     pub scale: Option<String>,
     pub config: Option<String>,
@@ -175,7 +176,7 @@ impl Tweak {
     /// `.../camera` where they are there, and the checkout's `userland/config`.
     pub fn from_repo(repo: &str) -> Tweak {
         let at = |rel: &str| Some(format!("{}/{rel}", repo.trim_end_matches('/'))).filter(|p| Path::new(p).is_dir());
-        Tweak { helpers: at("out/userland/helpers"), metal_plugin: at("out/userland/NativeAdrenoMetal.bundle"), camera_plugin: at("out/userland/camera"), scale: None, config: at("userland/config"), args: Vec::new() }
+        Tweak { helpers: at("out/userland/helpers"), metal_plugin: at("out/userland/NativeAdrenoMetal.bundle"), allow_no_metal: false, camera_plugin: at("out/userland/camera"), scale: None, config: at("userland/config"), args: Vec::new() }
     }
 }
 
@@ -469,6 +470,16 @@ pub fn build(args: &Args, space: Space) -> R<Built> {
     job::step("check");
     let p = Profile::load(&args.profile)?;
     let (build_id, version) = (p.var("P_BUILD").to_string(), p.var("P_VERSION").to_string());
+    if args.tweaks {
+        let device = p.var("P_DEVICE");
+        oneios_tweaks::preflight_metal(
+            device,
+            &build_id,
+            args.tweak.metal_plugin.as_deref().map(Path::new),
+            args.tweak.allow_no_metal,
+        )
+        .map_err(|e| refused("metal", format!("step check: {e:#}")))?;
+    }
     let indir = args.indir.trim_end_matches('/').to_string();
     let record = inputs_record(&indir);
     if !args.fetch {
@@ -679,8 +690,10 @@ pub fn build(args: &Args, space: Space) -> R<Built> {
             data: tree.clone(),
             overlay: overlay.clone(),
             build: Some(build_id.clone()),
+            device: Some(p.var("P_DEVICE").to_string()),
             helpers: t.helpers.clone().map(PathBuf::from),
             metal_plugin: t.metal_plugin.clone().map(PathBuf::from),
+            allow_no_metal: t.allow_no_metal,
             camera_plugin: t.camera_plugin.clone().map(PathBuf::from),
             scale: t.scale.clone(),
             config: t.config.clone().map(PathBuf::from),
@@ -953,6 +966,7 @@ oneios-tool image build: the whole image set in one process (scripts/image/build
   the root tweaks (oneios-tweaks; image-hook's inputs, all optional; --repo DIR gives image-hook's defaults there):
   --helpers DIR, --metal-plugin BUNDLE, --camera-plugin DIR, --scale 2|3, --tweaks-config DIR (default: the
                        userland/config built into the tool), --tweak-arg ARG (repeatable: more `apply` options)
+  ONEIOS_ALLOW_NO_METAL=1 deliberately skips Metal for a CPU-only S24 Ultra image
   -j N                 connections of the fetch (default 8)
 ";
 
@@ -1104,6 +1118,7 @@ fn parse(args: &[String]) -> Result<Option<Args>, String> {
     };
     // the root tweaks: image-hook's defaults from --repo, each option over them
     let mut tweak = repo_for_tweaks.as_deref().map(Tweak::from_repo).unwrap_or_default();
+    tweak.allow_no_metal = std::env::var("ONEIOS_ALLOW_NO_METAL").map_or(false, |value| value == "1");
     for (slot, given) in [(&mut tweak.helpers, t_helpers), (&mut tweak.metal_plugin, t_metal), (&mut tweak.camera_plugin, t_camera), (&mut tweak.scale, t_scale), (&mut tweak.config, t_config)] {
         if given.is_some() {
             *slot = given;
