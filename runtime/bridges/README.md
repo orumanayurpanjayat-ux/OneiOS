@@ -205,6 +205,10 @@ exclusive, mmap 1, burst B, ...; MMAP exclusive: the DSP reads the buffer`, or t
 given`, `MMAP shared ...`). Beside One UI system_server runs, so an MMAP shared answer is kept there (in a session
 it is not): `ONEIOS_AUDIO_SYSTEM_SERVER=0 bridgectl audio ...` behaves as a session does. Its reports end
 `latency about N ms; end-to-end N ms (...)`; on MMAP exclusive about 10-20 ms is expected [I], was 128-137.
+If an MMAP stream stops accepting writes for 600 ms, or AAudio holds queued frames unread for 1 s, the helper marks
+that stream dead and reopens the speaker on the legacy mixer path once for that run. The latency probe has a 3 s budget;
+it does not wait for a silent mixer track to start, so a zero-frame result means the output latency was not measured.
+This fallback only triggers on the detected stall; S24 Ultra behavior still needs a device run.
 `audio-loop` plays N clicks (20 ms of 1 kHz at -30 dBFS, 0.5 s apart) while the microphone records, and prints
 when each was heard after it was handed to the helper (`audio-loop: click K: heard N ms after ...`), the noise and
 the threshold (`noise -52 dBFS`: 18 dB above it, at least -56 dBFS), and `audio-loop: round trip (the speaker + the

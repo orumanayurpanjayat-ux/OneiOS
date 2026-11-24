@@ -393,7 +393,10 @@ fn audio_latency_arg(config: &mut Config, audio: &dyn AudioBackend) {
         logi!("audio: ONEIOS_AUDIO_PROBE=0: the kernel's default output latency");
         return;
     }
-    let frames = match audio.probe_latency(2000) {
+    // 3 s: on a dead MMAP stream the helper gives up as soon as its writer has counted 600 ms of timeouts (about a
+    // second), and its fallback opens a mixer track without waiting on that track (the probe's 1.5 s are only spent on
+    // a stream that reads but gives no timestamp). The old 2 s left too little room for the fallback's open.
+    let frames = match audio.probe_latency(3000) {
         Ok(f) if f > 0 => f,
         Ok(_) => {
             logi!(
