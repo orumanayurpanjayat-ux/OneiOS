@@ -157,9 +157,13 @@ stage() {
   # warning option an error), so the plug-in script is told about it only when the compiler knows it
   local knows=0
   echo 'int x;' | "$IOS_DIR/ios-clang" -Werror -Wno-error=unused-but-set-global -x c -c - -o /dev/null 2>/dev/null && knows=1
-  local rt=()
-  [ "$RUNTIME" = rt ] && rt=(--rt)
-  "$ONEIOS_TOOL" ios metal-stage-edit "$R" "$HOOKS" "$JOBS" "$knows" "${rt[@]}"
+  # macOS runners ship Bash 3.2, where expanding an empty array under `set -u` is an error.
+  # Keep the default invocation argument-free and pass the opt-in flag explicitly.
+  if [ "$RUNTIME" = rt ]; then
+    "$ONEIOS_TOOL" ios metal-stage-edit "$R" "$HOOKS" "$JOBS" "$knows" --rt
+  else
+    "$ONEIOS_TOOL" ios metal-stage-edit "$R" "$HOOKS" "$JOBS" "$knows"
+  fi
   # The bridge script takes the translator's source only as the pin plus a prefix of its patch list ("Translator source
   # differs from the pinned revision plus its recorded patches"). A list whose order or a patch that changed since the
   # last stage leaves a tree that is no prefix (2026-11-25: main's 90101, 90102, 90110 came before this branch's

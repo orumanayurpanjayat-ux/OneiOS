@@ -1204,6 +1204,8 @@ oneios-tool ios tbd-diff A B                                               # two
 **The Metal plug-in's build (2026-11-23).** `userland/metal/build.sh turnip` sets Turnip's build directory up again when
 the inputs of its cross file changed (record: `out/metal/root/build/mesa-tu-ios27.cross-inputs`); the copies of
 `userland/metal/patches/metal2vulkan` are not applied (docs/gpu.md section 7, "Build notes").
+The default Metal staging call also stays compatible with macOS's Bash 3.2: its optional `--rt` flag is added only for
+`METAL_RUNTIME=rt`, without expanding an empty array under `set -u`.
 
 **Trust.** The guest runs a binary whose CDHash is in a trust cache. Ours get there through the image hook: it reads
 the CDHash from each signed Mach-O it places and writes `overlay/userland/owner-trust.json` ([userland.md](userland.md)).
