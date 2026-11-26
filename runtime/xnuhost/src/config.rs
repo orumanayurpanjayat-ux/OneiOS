@@ -2098,9 +2098,10 @@ pub fn boot_args_bt_transport(args: &str) -> Option<u32> {
 
 /// xh_display_boot_args: the display's switches the guest needs, unless the command line has them: its UI scale
 /// (offline-legacy-unit-scale, /chosen display-scale), the panel's rate (sheng-vsync: the vsync tick and, above 60 Hz,
-/// the refresh properties), and with a half-float frame (display-format=rgba16f) oneios-display-wide=1, which tells the
-/// guest's display to hand half-float surfaces to the scanout as they are instead of narrowing them to 8 bits. Err with
-/// no room in a C buffer of `size` bytes (what was added before stays).
+/// the refresh properties), one fixed rate above 60 Hz (sheng-vsync-fixed), and with a half-float frame
+/// (display-format=rgba16f) oneios-display-wide=1, which tells the guest's display to hand half-float surfaces to the
+/// scanout as they are instead of narrowing them to 8 bits. Err with no room in a C buffer of `size` bytes (what was
+/// added before stays).
 pub fn display_boot_args(
     args: &mut String,
     size: usize,
@@ -2116,6 +2117,13 @@ pub fn display_boot_args(
     }
     if !has_switch(args, "sheng-vsync") {
         append_arg(args, size, &format!("sheng-vsync={hz}"))?;
+    }
+    // The panel refreshes at one rate; its driver's original maximum refresh interval (1/24 s) is ProMotion's range,
+    // not this panel's. The render server reads the range and lets CoreAnimation pick 30 Hz for an animation inside
+    // it; a fixed rate makes the animation ask for the panel's (docs/gpu.md, "The refresh range"). A given
+    // sheng-vsync-fixed stays (0: the variable range set by sheng-vsync-min, 60..120 by default).
+    if hz > 60 && !has_switch(args, "sheng-vsync-fixed") {
+        append_arg(args, size, "sheng-vsync-fixed=1")?;
     }
     Ok(())
 }
