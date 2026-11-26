@@ -1,5 +1,6 @@
 # OneiOS's one workflow (docs/releases.md, "CI and releases"): the runtime package and the OneOS app (the fork,
-# submodule app/), with the runtime's Metal and capture plug-ins built on a Mac.
+# submodule app/), with the runtime's Metal and capture plug-ins built on a Mac (or reused from a verified
+# `metal-plugin` run when a manual dispatch supplies `metal_run_id`).
 #
 #   plan ──┬── metal (xcode-27) ─┬── runtime (ubuntu-24.04) package and checks
 #          │                    └── apk-macos (xcode-27), after apk completes
@@ -9,8 +10,8 @@
 # apk-macos waits for metal because both jobs use the limited xcode-27 runner pool.
 #
 # Triggers: a pull request or a push to main builds both and releases nothing. A tag vN.N.N[-suffix] on main builds
-# both and releases both. A dispatch (Actions, "build and release", Run workflow) on main takes a version and
-# "both", "runtime only" or "apk only".
+# both and releases both. A dispatch (Actions, "build and release", Run workflow) on main takes a version,
+# "both", "runtime only" or "apk only", and optionally a successful `metal-plugin` run ID to reuse.
 # The runtime job never checks out app/: the fork's tree cannot reach the package. Nothing of Apple's, Samsung's,
 # Google's or OPPO's is downloaded or uploaded here: runtime/package.sh refuses Apple files (`oneios-tool package`),
 # and .github/scripts/check-apk.sh refuses an APK that carries a package set, an image or firmware.
@@ -32,6 +33,10 @@ on:
         type: choice
         options: [both, runtime only, apk only]
         default: both
+      metal_run_id:
+        description: 'Optional successful metal-plugin run ID to reuse its iPhone18,2 24A446 artifact instead of rebuilding it'
+        required: false
+        type: string
 permissions:
   contents: read
 concurrency:
@@ -47,6 +52,10 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       runtime: ${{ steps.plan.outputs.runtime }}
       apk: ${{ steps.plan.outputs.apk }}
+      metal_run_id: ${{ steps.plan.outputs.metal_run_id }}
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -59,17 +68,32 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           IN_VERSION: ${{ inputs.version }}
           IN_BUILD: ${{ inputs.build }}
+          IN_METAL_RUN_ID: ${{ inputs.metal_run_id }}
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          release=false version=0.0.0-ci runtime=true apk=true
+          release=false version=0.0.0-ci runtime=true apk=true metal_run_id=$IN_METAL_RUN_ID
           if [ "$EVENT" = push ] && [[ $REF == refs/tags/* ]]; then
             release=true version=${REF_NAME#v}
           elif [ "$EVENT" = workflow_dispatch ]; then
             release=true version=${IN_VERSION#v}
             case "$IN_BUILD" in both) ;; "runtime only") apk=false ;; "apk only") runtime=false ;;
               *) echo "::error::build '$IN_BUILD' is not both, runtime only or apk only"; exit 1 ;; esac
+          fi
+          if [ -n "$metal_run_id" ]; then
+            [ "$EVENT" = workflow_dispatch ] || { echo "::error::metal_run_id is only accepted on a workflow dispatch"; exit 1; }
+            [[ "$IN_BUILD" != "apk only" ]] || { echo "::error::metal_run_id cannot be used with an APK-only build"; exit 1; }
+            [[ "$metal_run_id" =~ ^[0-9]+$ ]] || { echo "::error::metal_run_id must be a numeric Actions run ID"; exit 1; }
+            workflow_id=$(gh api "repos/$REPO/actions/workflows/metal-plugin.yml" --jq .id)
+            run=$(gh api "repos/$REPO/actions/runs/$metal_run_id")
+            jq -e --argjson workflow_id "$workflow_id" --arg repo "$REPO" '
+              .workflow_id == $workflow_id and .event == "workflow_dispatch" and
+              .status == "completed" and .conclusion == "success" and .head_branch == "main" and
+              .head_repository.full_name == $repo
+            ' <<< "$run" >/dev/null || { echo "::error::run $metal_run_id is not a successful manual metal-plugin run from this repository's main branch"; exit 1; }
+            artifacts=$(gh api "repos/$REPO/actions/runs/$metal_run_id/artifacts" --jq '[.artifacts[] | select(.name == "NativeAdrenoMetal" and .expired == false)] | length')
+            [ "$artifacts" = 1 ] || { echo "::error::run $metal_run_id has no live NativeAdrenoMetal artifact"; exit 1; }
           fi
           if [ "$release" = true ]; then
             [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.]*)?$ ]] || { echo "::error::version '$version' is not N.N.N[-suffix]"; exit 1; }
@@ -82,20 +106,25 @@ jobs:
             release=false
           fi
           echo "release=$release version=$version runtime=$runtime apk=$apk"
-          { echo "release=$release"; echo "version=$version"; echo "runtime=$runtime"; echo "apk=$apk"; } >> "$GITHUB_OUTPUT"
+          { echo "release=$release"; echo "version=$version"; echo "runtime=$runtime"; echo "apk=$apk"; echo "metal_run_id=$metal_run_id"; } >> "$GITHUB_OUTPUT"
 
   metal:
     needs: plan
-    if: needs.plan.outputs.runtime == 'true'
+    if: needs.plan.outputs.runtime == 'true' && needs.plan.outputs.metal_run_id == ''
     uses: ./.github/workflows/metal-plugin.yml
     with:
       target: 'iPhone18,2 24A446'
 
   runtime:
     needs: [plan, metal]
-    if: needs.plan.outputs.runtime == 'true'
+    if: >-
+      always() && needs.plan.outputs.runtime == 'true' &&
+      (needs.metal.result == 'success' || needs.plan.outputs.metal_run_id != '')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
     env:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.plan.outputs.version }}
@@ -177,6 +206,25 @@ jobs:
         with:
           name: NativeAdrenoMetal
           path: out/metal-guest
+          run-id: ${{ needs.plan.outputs.metal_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify the selected Metal artifact target
+        run: |
+          set -euo pipefail
+          bundle=out/metal-guest/NativeAdrenoMetal.bundle
+          addon=out/metal-guest/NativeAdrenoMetal.gpuaddon
+          record=out/metal-guest/NativeAdrenoMetal.build.json
+          manifest=out/metal-guest/NativeAdrenoMetal.sha256
+          for file in "$bundle/NativeAdrenoMetal" "$bundle/libvulkan_freedreno.dylib" "$bundle/oneios-target" "$addon" "$record" "$manifest" out/metal-guest/camera/H9ISP.mediacapture; do
+            [ -s "$file" ] || { echo "::error::Required Metal artifact is missing or empty: $file"; exit 1; }
+          done
+          sed 's#out/userland/#out/metal-guest/#g' "$manifest" | sha256sum --check --strict -
+          [ "$(cat "$bundle/oneios-target")" = 'iPhone18,2 24A446' ] || { echo "::error::Metal artifact is for a different guest target"; exit 1; }
+          grep -Fq '"target": "iPhone18,2 24A446"' "$record" || { echo "::error::Metal build record target does not match"; exit 1; }
+          grep -Fq '"arch": "arm64e"' "$record" || { echo "::error::Metal build record does not identify arm64e binaries"; exit 1; }
+          grep -Fq 'ios macho-check passed' "$record" || { echo "::error::Metal build record does not confirm Mach-O validation"; exit 1; }
+          # Actions artifacts are ZIPs and extract files as 0644; restore the two guest executables before packaging.
+          chmod 0755 "$bundle/NativeAdrenoMetal" out/metal-guest/camera/H9ISP.mediacapture
       - name: Package (refuses Apple files and what Android cannot load)
         env:
           METAL_DIR: out/metal-guest

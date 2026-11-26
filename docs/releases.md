@@ -216,17 +216,24 @@ plan ──┬── metal (xcode-27) ─┬── runtime (ubuntu-24.04) packag
 ```
 
 `metal` and `apk` start after `plan`. `runtime` packages the verified Metal and capture plug-ins from `metal`; it fetches
-their pinned source licences to include the generated `lib/guest/NOTICE`. `apk-macos` needs both `apk` and `metal`, so it
-starts only after the Metal build frees the limited `xcode-27` runner pool.
+their pinned source licences to include the generated `lib/guest/NOTICE`. For a manual dispatch, `metal_run_id` can name
+a completed successful manual `metal-plugin` run on `main`; the plan job validates that run and its artifact, skips the
+new Metal build, then downloads that artifact into the runtime package. Leave `metal_run_id` blank to build Metal in the
+same run. The runtime verifies the artifact's SHA-256 manifest, target and arm64e build record before packaging,
+restores the bundle and capture plug-in's executable bits after artifact extraction, and the package step checks the
+Metal source pins against this checkout. `apk-macos` still waits for both the APK and the Metal job to finish; when an
+external artifact is selected, that Metal job is skipped and the macOS tests can start as soon as the APK is ready.
 
 | Trigger | Builds | Releases |
 |---|---|---|
 | a pull request, a push to `main` | metal, runtime, apk, apk-macos | nothing (the runtime package and APK are Actions artifacts) |
 | a tag `vN.N.N` or `vN.N.N-suffix` on `main` | all four build jobs | the runtime and the APK on the release of the tag |
-| a dispatch on `main` (Actions, "build and release", Run workflow; inputs `version` and `both` / `runtime only` / `apk only`) | metal and runtime when selected; apk-macos with apk | the release `v<version>`, its tag made at the dispatched commit when missing |
+| a dispatch on `main` (Actions, "build and release", Run workflow; inputs `version`, `build`, optional `metal_run_id`) | metal and runtime when selected; a verified external Metal artifact can replace the Metal build; apk-macos with apk | the release `v<version>`, its tag made at the dispatched commit when missing |
 | a dispatch of `metal-plugin` (Actions; input `target`, default `iPhone18,2 24A446`) | the selected Metal and capture plug-ins on `xcode-27` | no release; a separate Actions artifact |
 
-- **plan**: whether the run releases, the version (`0.0.0-ci` when not), what it builds. A release's version must be
+- **plan**: whether the run releases, the version (`0.0.0-ci` when not), what it builds, and (for a manual dispatch)
+  whether a successful manual Metal run ID was supplied. That run must belong to `metal-plugin`, be completed and
+  successful on `main`, and still have the `NativeAdrenoMetal` artifact. A release's version must be
   `N.N.N[-suffix]` and its commit on `main`. A tag whose release exists already (published from a build machine by
   `scripts/release/release.sh`, "Releasing from a build machine" below) does not release again: its run builds and
   tests only.
