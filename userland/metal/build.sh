@@ -256,7 +256,14 @@ finish() {
   cp -r "$built" "$bundle"
   # The file the root tweaks look for: this bundle's addresses are this guest's.
   echo "$TARGET_ID" > "$bundle/oneios-target"
-  "$ONEIOS_TOOL" ios macho-check --local "$bundle/libvulkan_freedreno.dylib" "$bundle/NativeAdrenoMetal" "$bundle/libvulkan_freedreno.dylib" | tee "$OUT/NativeAdrenoMetal.check.txt"
+  if [ -s "$IOS_TBD/usr/lib/libSystem.B.tbd" ]; then
+    "$ONEIOS_TOOL" ios macho-check --tbd "$IOS_TBD" --local "$bundle/libvulkan_freedreno.dylib" \
+      "$bundle/NativeAdrenoMetal" "$bundle/libvulkan_freedreno.dylib" | tee "$OUT/NativeAdrenoMetal.check.txt"
+  else
+    say "guest shared-cache stubs are unavailable; checking against the iPhoneOS SDK stubs"
+    "$ONEIOS_TOOL" ios macho-check --sdk --local "$bundle/libvulkan_freedreno.dylib" \
+      "$bundle/NativeAdrenoMetal" "$bundle/libvulkan_freedreno.dylib" | tee "$OUT/NativeAdrenoMetal.check.txt"
+  fi
   "$ONEIOS_TOOL" ios metal-record "$ROOT" "$bundle" "$OUT/NativeAdrenoMetal.build.json" "$HOOKS" "$TARGET_ID"
   # Which bridge runtime the bundle carries, beside the record (the record names the base's pins either way).
   echo "$RUNTIME" > "$OUT/NativeAdrenoMetal.runtime"
