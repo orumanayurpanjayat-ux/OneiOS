@@ -1,14 +1,12 @@
 # OneiOS's one workflow (docs/releases.md, "CI and releases"): the runtime package and the OneOS app (the fork,
 # submodule app/), with the runtime's Metal and capture plug-ins built on a Mac.
 #
-#   plan ──┬── metal      (xcode-27)    source-built Metal and capture plug-ins
-#          ├── runtime    (ubuntu-24.04) script checks, host tests, runtime/package.sh, the Apple-file refusal,
-#          │                             elf-check, drm2kgsl, the package's members, bin/oneios-tool for the
-#          │                             phone and oneios-tool-VERSION-android-arm64 beside the package
-#          ├── apk        (ubuntu-24.04) app/ at the head of the fork's branch, JDK 21, tribalfs' packages,
-#          │                             ./gradlew test assembleFullDebug, the APK's assets checked
-#          ├── apk-macos  (xcode-27)     ./gradlew test of the same checkout on a Mac (core:root's script tests)
-#          └──────────────── release     needs runtime and apk; a tag v* or a dispatch only
+#   plan ──┬── metal (xcode-27) ─┬── runtime (ubuntu-24.04) package and checks
+#          │                    └── apk-macos (xcode-27), after apk completes
+#          ├── apk (ubuntu-24.04) ────────┘ app build, tests and APK
+#          └── release needs runtime and apk; a tag v* or a dispatch only
+#
+# apk-macos waits for metal because both jobs use the limited xcode-27 runner pool.
 #
 # Triggers: a pull request or a push to main builds both and releases nothing. A tag vN.N.N[-suffix] on main builds
 # both and releases both. A dispatch (Actions, "build and release", Run workflow) on main takes a version and
@@ -355,10 +353,11 @@ jobs:
   #
   # xcode-27, not macos-15: both are arm64 macOS images with the Android SDK and JDK 21, but the 3-core macos-15 pool
   # was starved ("The job was not acquired by Runner of type hosted even after multiple attempts") and GitHub
-  # cancelled the job after ~15 minutes, turning every push red while plan/runtime/apk had passed.
+  # cancelled the job after ~15 minutes, turning every push red while plan/runtime/apk had passed. xcode-27 also
+  # runs the Metal build; queue the app tests behind it so Metal does not expire waiting for the same runner.
   apk-macos:
-    needs: plan
-    if: needs.plan.outputs.apk == 'true'
+    needs: [plan, apk, metal]
+    if: always() && needs.plan.outputs.apk == 'true' && needs.apk.result == 'success'
     runs-on: xcode-27
     timeout-minutes: 60
     permissions:

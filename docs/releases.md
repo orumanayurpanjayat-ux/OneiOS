@@ -209,15 +209,15 @@ The "build and release" workflow, `.github/workflows/release.yml`, builds the Me
 "build and release" are:
 
 ```
-plan ──┬── metal      xcode-27       source-built Metal and capture plug-ins
-       ├── runtime    ubuntu-24.04   the runtime package, including those plug-ins, and its checks
-       ├── apk        ubuntu-24.04   the OneOS app (submodule app/) and its checks
-       ├── apk-macos  xcode-27       ./gradlew test of the same app on a Mac
-       └───────────── release        needs runtime and apk; a tag or a dispatch only
+plan ──┬── metal (xcode-27) ─┬── runtime (ubuntu-24.04) package and checks
+       │                    └── apk-macos (xcode-27), after apk completes
+       ├── apk (ubuntu-24.04) ────────┘ OneOS app and checks
+       └── release needs runtime and apk; a tag or a dispatch only
 ```
 
-`metal`, `apk` and `apk-macos` start together after `plan`; `runtime` packages the verified Metal and capture plug-ins
-from `metal`. It fetches their pinned source licences to include the generated `lib/guest/NOTICE`.
+`metal` and `apk` start after `plan`. `runtime` packages the verified Metal and capture plug-ins from `metal`; it fetches
+their pinned source licences to include the generated `lib/guest/NOTICE`. `apk-macos` needs both `apk` and `metal`, so it
+starts only after the Metal build frees the limited `xcode-27` runner pool.
 
 | Trigger | Builds | Releases |
 |---|---|---|
