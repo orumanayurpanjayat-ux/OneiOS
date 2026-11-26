@@ -1,7 +1,8 @@
 # OneiOS's one workflow (docs/releases.md, "CI and releases"): the runtime package and the OneOS app (the fork,
-# submodule app/) built at the same time on two runners, and a release that carries both.
+# submodule app/), with the runtime's Metal and capture plug-ins built on a Mac.
 #
-#   plan ──┬── runtime    (ubuntu-24.04) script checks, host tests, runtime/package.sh, the Apple-file refusal,
+#   plan ──┬── metal      (xcode-27)    source-built Metal and capture plug-ins
+#          ├── runtime    (ubuntu-24.04) script checks, host tests, runtime/package.sh, the Apple-file refusal,
 #          │                             elf-check, drm2kgsl, the package's members, bin/oneios-tool for the
 #          │                             phone and oneios-tool-VERSION-android-arm64 beside the package
 #          ├── apk        (ubuntu-24.04) app/ at the head of the fork's branch, JDK 21, tribalfs' packages,
@@ -85,8 +86,15 @@ jobs:
           echo "release=$release version=$version runtime=$runtime apk=$apk"
           { echo "release=$release"; echo "version=$version"; echo "runtime=$runtime"; echo "apk=$apk"; } >> "$GITHUB_OUTPUT"
 
-  runtime:
+  metal:
     needs: plan
+    if: needs.plan.outputs.runtime == 'true'
+    uses: ./.github/workflows/metal-plugin.yml
+    with:
+      target: 'iPhone18,2 24A446'
+
+  runtime:
+    needs: [plan, metal]
     if: needs.plan.outputs.runtime == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -133,6 +141,11 @@ jobs:
           set -euo pipefail
           scripts/setup/get-references.sh virglrenderer
           test -f external/virglrenderer/src/drm/drm2kgsl/drm2kgsl_renderer.c || { echo "virglrenderer checkout has no drm2kgsl"; exit 1; }
+      - name: Pinned source licences for the guest plug-ins
+        run: |
+          set -euo pipefail
+          kernel/fetch.sh Droid-VM-UniXNU
+          scripts/setup/get-references.sh NativeMetal NativeAdreno NativeMobileDisplay AdrenoPM4 metal2vulkan mesa-droidvm
       - name: Host tests
         run: |
           set -euo pipefail
@@ -161,7 +174,16 @@ jobs:
           gh release download "$ktag" --repo "$krepo" --pattern 'xnu-*.tar.zst' --dir out/kernel/dl
           echo "$ksha  $(ls out/kernel/dl/xnu-*.tar.zst)" | sha256sum -c -
           zstd -dc out/kernel/dl/xnu-*.tar.zst | tar -x -C out/kernel/current
+      - name: Download the Metal and capture plug-ins
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: NativeAdrenoMetal
+          path: out/metal-guest
       - name: Package (refuses Apple files and what Android cannot load)
+        env:
+          METAL_DIR: out/metal-guest
+          CAMERA_DIR: out/metal-guest/camera
+          REQUIRE_METAL: '1'
         run: runtime/package.sh "$VERSION"
       - name: The package's xnuhost and gpuctl have drm2kgsl
         run: |
@@ -187,6 +209,10 @@ jobs:
           ( cd out/release && sha256sum -c "$(basename "$a").sha256" )
           zstd -dc "$a" | tar -t | tee members.txt | grep -Ev '^(runtime\.json|NOTICE|LICENSE|(bin|lib|scripts)/[^/].*|kernel/([0-9A-Z]+/)?xnu\.macho(\.build\.json)?)$' && { echo "::error::the package has members outside the runtime's folders (above)"; exit 1; }
           [ "$(head -n 1 members.txt)" = runtime.json ] || { echo "::error::runtime.json is not the first member"; exit 1; }
+          grep -qx 'lib/guest/NativeAdrenoMetal.bundle/NativeAdrenoMetal' members.txt || { echo "::error::runtime has no Metal executable"; exit 1; }
+          grep -qx 'lib/guest/camera/H9ISP.mediacapture' members.txt || { echo "::error::runtime has no capture plug-in"; exit 1; }
+          zstd -dc "$a" | tar -xO runtime.json > runtime.json
+          jq -e '.metal.target == "iPhone18,2 24A446" and .camera.path == "lib/guest/camera"' runtime.json >/dev/null || { echo "::error::runtime manifest does not name the expected Metal and camera plug-ins"; exit 1; }
           echo "$(wc -l < members.txt) members, runtime.json first"
       - name: The phone's oneios-tool is the package's bin/oneios-tool, stripped, with its .sha256
         # runtime/package.sh builds tools/oneios-tool for aarch64-linux-android into bin/oneios-tool and writes the

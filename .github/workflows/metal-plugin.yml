@@ -1,7 +1,7 @@
-# Build the Metal plug-in (NativeAdrenoMetal.bundle) on a macOS runner: Xcode's iPhoneOS SDK, the pins'
+# Build the Metal plug-in (NativeAdrenoMetal.bundle) and capture plug-in on a macOS runner: Xcode's iPhoneOS SDK, the pins'
 # public sources, this tree's patches — no Apple image, no shared cache (the link uses the SDK's .tbd
 # stubs; the plug-in's shared-cache addresses come from userland/metal/hooks/<product>-<build>.json, which
-# is committed). Manual run only; download the artifact and stage it on the phone.
+# is committed). This is reusable by the runtime workflow; it can also be run manually for a stageable artifact.
 #
 #   Actions -> metal-plugin -> Run workflow, target "iPhone18,2 24A446"
 #
@@ -10,6 +10,13 @@
 # place it; the GPU addon is the same bundle as a kernelkc.gpuaddon sidecar (oneios-tool phone addon).
 name: metal-plugin
 on:
+  workflow_call:
+    inputs:
+      target:
+        description: 'The guest to build for: "<product> <build>" (userland/metal/hooks/<product>-<build>.json)'
+        required: false
+        type: string
+        default: 'iPhone18,2 24A446'
   workflow_dispatch:
     inputs:
       target:
@@ -114,6 +121,9 @@ jobs:
         run: |
           set -euo pipefail
           userland/metal/build.sh all 2>&1 | tee metal-build.log
+      - name: Build the capture plug-in for the same guest runtime
+        timeout-minutes: 10
+        run: userland/camera/build.sh out/userland/camera
       - name: Verify the target-tagged bundle and GPU addon
         env:
           ONEIOS_METAL_TARGET: ${{ inputs.target }}
@@ -125,7 +135,8 @@ jobs:
           record=out/userland/NativeAdrenoMetal.build.json
           check=out/userland/NativeAdrenoMetal.check.txt
           runtime=out/userland/NativeAdrenoMetal.runtime
-          for file in "$bundle/NativeAdrenoMetal" "$bundle/libvulkan_freedreno.dylib" "$bundle/oneios-target" "$addon" "$cdhashes" "$record" "$check" "$runtime"; do
+          camera=out/userland/camera/H9ISP.mediacapture
+          for file in "$bundle/NativeAdrenoMetal" "$bundle/libvulkan_freedreno.dylib" "$bundle/oneios-target" "$addon" "$cdhashes" "$record" "$check" "$runtime" "$camera"; do
             [ -s "$file" ] || { echo "::error::Required Metal build output is missing or empty: $file"; exit 1; }
           done
           [ "$(cat "$bundle/oneios-target")" = "$ONEIOS_METAL_TARGET" ] || { echo "::error::Bundle target does not match $ONEIOS_METAL_TARGET"; exit 1; }
@@ -134,13 +145,13 @@ jobs:
           grep -Fq 'ios macho-check passed' "$record" || { echo "::error::Build record does not confirm the Mach-O check"; exit 1; }
           manifest=out/userland/NativeAdrenoMetal.sha256
           find "$bundle" -type f -print0 | xargs -0 shasum -a 256 > "$manifest"
-          shasum -a 256 "$addon" "$cdhashes" "$record" "$check" "$runtime" >> "$manifest"
+          shasum -a 256 "$addon" "$cdhashes" "$record" "$check" "$runtime" "$camera" >> "$manifest"
           cat "$manifest"
           {
             echo "### Metal plug-in outputs verified"
             echo "- Target: \`$ONEIOS_METAL_TARGET\`"
             echo "- Bridge runtime: \`$(cat "$runtime")\`"
-            echo "- Bundle, arm64e binaries, Mach-O check, build record, NGPUADD2 sidecar, and its phone-staging CDHashes are present."
+            echo "- Bundle, arm64e binaries, Mach-O check, build record, capture plug-in, NGPUADD2 sidecar, and its phone-staging CDHashes are present."
             echo "- SHA-256 manifest: \`out/userland/NativeAdrenoMetal.sha256\`"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: What was built
@@ -148,7 +159,9 @@ jobs:
         timeout-minutes: 2
         run: |
           set -euo pipefail
-          { ls -l out/userland 2>/dev/null || true; cat out/userland/NativeAdrenoMetal.build.json 2>/dev/null || true; } | tee -a metal-build.log
+          mkdir -p out/userland
+          if [ -f metal-build.log ]; then cp metal-build.log out/userland/metal-build.log; else : > out/userland/metal-build.log; fi
+          { ls -l out/userland 2>/dev/null || true; cat out/userland/NativeAdrenoMetal.build.json 2>/dev/null || true; } | tee -a out/userland/metal-build.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         timeout-minutes: 10
@@ -163,5 +176,6 @@ jobs:
             out/userland/NativeAdrenoMetal.build.json
             out/userland/NativeAdrenoMetal.check.txt
             out/userland/NativeAdrenoMetal.runtime
+            out/userland/camera/H9ISP.mediacapture
             out/userland/NativeAdrenoMetal.sha256
-            metal-build.log
+            out/userland/metal-build.log

@@ -204,38 +204,40 @@ runtime/package.sh 0.1.7-dev                           # -> out/release/oneios-r
 
 ## CI and releases
 
-The "build and release" workflow, `.github/workflows/release.yml`, builds the runtime and app. A separate,
-manual-only `.github/workflows/metal-plugin.yml` builds the Metal plug-in for a selected target. The jobs in
+The "build and release" workflow, `.github/workflows/release.yml`, builds the Metal and capture plug-ins, runtime, and app.
+`.github/workflows/metal-plugin.yml` is shared by the runtime build and a manual run for a selected target. The jobs in
 "build and release" are:
 
 ```
-plan ──┬── runtime    ubuntu-24.04   the runtime package and its checks
+plan ──┬── metal      xcode-27       source-built Metal and capture plug-ins
+       ├── runtime    ubuntu-24.04   the runtime package, including those plug-ins, and its checks
        ├── apk        ubuntu-24.04   the OneOS app (submodule app/) and its checks
        ├── apk-macos  xcode-27       ./gradlew test of the same app on a Mac
        └───────────── release        needs runtime and apk; a tag or a dispatch only
 ```
 
-`runtime`, `apk` and `apk-macos` start together after `plan`. The runtime job does not build or download the optional
-guest plug-ins.
+`metal`, `apk` and `apk-macos` start together after `plan`; `runtime` packages the verified Metal and capture plug-ins
+from `metal`. It fetches their pinned source licences to include the generated `lib/guest/NOTICE`.
 
 | Trigger | Builds | Releases |
 |---|---|---|
-| a pull request, a push to `main` | runtime, apk, apk-macos | nothing (the runtime package and APK are Actions artifacts) |
-| a tag `vN.N.N` or `vN.N.N-suffix` on `main` | all three build jobs | the runtime and the APK on the release of the tag |
-| a dispatch on `main` (Actions, "build and release", Run workflow; inputs `version` and `both` / `runtime only` / `apk only`) | runtime and/or apk as selected; apk-macos with apk | the release `v<version>`, its tag made at the dispatched commit when missing |
-| a dispatch of `metal-plugin` (Actions; input `target`, default `iPhone18,2 24A446`) | the selected Metal plug-in on `xcode-27` | no release; a separate Actions artifact |
+| a pull request, a push to `main` | metal, runtime, apk, apk-macos | nothing (the runtime package and APK are Actions artifacts) |
+| a tag `vN.N.N` or `vN.N.N-suffix` on `main` | all four build jobs | the runtime and the APK on the release of the tag |
+| a dispatch on `main` (Actions, "build and release", Run workflow; inputs `version` and `both` / `runtime only` / `apk only`) | metal and runtime when selected; apk-macos with apk | the release `v<version>`, its tag made at the dispatched commit when missing |
+| a dispatch of `metal-plugin` (Actions; input `target`, default `iPhone18,2 24A446`) | the selected Metal and capture plug-ins on `xcode-27` | no release; a separate Actions artifact |
 
 - **plan**: whether the run releases, the version (`0.0.0-ci` when not), what it builds. A release's version must be
   `N.N.N[-suffix]` and its commit on `main`. A tag whose release exists already (published from a build machine by
   `scripts/release/release.sh`, "Releasing from a build machine" below) does not release again: its run builds and
   tests only.
-- **metal-plugin**: manual-only Xcode 27 build on `xcode-27`. It fetches the pinned public sources, builds
-  `NativeAdrenoMetal.bundle` and its `.gpuaddon` sidecar for the selected target, and uploads the bundle, build record,
-  check report and build log as a separate artifact. It has no guest image-set input, so it accepts the absence of the
+- **metal-plugin**: reusable Xcode 27 build on `xcode-27`, also manually runnable. It fetches the pinned public sources,
+  builds `NativeAdrenoMetal.bundle`, its `.gpuaddon` sidecar and the capture plug-in for the selected target, and uploads
+  them with the build record, check report and build log. The runtime job downloads this artifact and requires both
+  plug-ins before packaging; it checks the archive's manifest and contents. It has no guest image-set input, so it accepts the absence of the
   image-specific linker stubs and uses Xcode's SDK stubs; missing Xcode SDK or linker requirements fail before the build.
   The target must have a checked-in hooks file before any toolchain fetch; a successful run verifies the target marker,
   arm64e binaries, Mach-O check, build record and sidecar, and uploads a SHA-256 manifest. Missing build outputs fail the
-  job. It does not publish a release or feed the runtime job.
+  job when run manually. It does not publish a release.
 - **runtime**: what `ci.yml` and the old `release.yml` did, on every build. `app/` must be an empty submodule
   folder (this job never checks the fork out); no firmware and no Python in git (`check-tracked-files.sh`: a
   tracked `*.py`, or an executable with a python shebang, fails it since 2026-11-21); `bash -n`, `shellcheck -S error`; NDK 28.2.13676358, Rust and
