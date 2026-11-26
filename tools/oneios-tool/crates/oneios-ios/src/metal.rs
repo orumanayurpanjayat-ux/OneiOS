@@ -448,7 +448,7 @@ pub fn record(root: &Path, bundle: &Path, record: &Path, hooks: &Path, target: &
     }
     let mut cdhashes: Vec<String> = files.values().filter_map(|f| if let Value::Object(m) = f { m.get("cdhash").map(Value::text) } else { None }).collect();
     cdhashes.sort();
-    let tbd_root = Path::new(&env("IOS_TBD")?);
+    let tbd_root = std::path::PathBuf::from(env("IOS_TBD")?);
     let tbd = tbd_root.join("tbd.json");
     let checked_with_guest_stubs = tbd_root.join("usr/lib/libSystem.B.tbd").is_file();
     let stubs = if tbd.exists() { oneios_json::read(&tbd.to_string_lossy())? } else { Value::Null };
