@@ -1017,7 +1017,8 @@ no `AGX*` user-client call from backboardd). Now:
 - The mount is on by default in the hosted kernel; `sheng-gpu-addon=0` turns it off.
 - The source is the Data seed's folder, or `/private/var/ngpu/addons` if a GPU addon was handed to this boot:
   `kernel.kc.gpuaddon` beside the kernel (`userland/metal/build.sh addon` makes it as
-  `out/userland/NativeAdrenoMetal.gpuaddon`, xnuhost passes it on, `native_ram_block_gpu_addon` in `gpu/OneiOSAdreno.cpp`
+  `out/userland/NativeAdrenoMetal.gpuaddon` with the companion `.gpuaddon.cdhashes` required by `oneios-tool phone addon`,
+  xnuhost passes it on, `native_ram_block_gpu_addon` in `gpu/OneiOSAdreno.cpp`
   finds it). The kernel writes its files into Data first, so a rebuilt plug-in needs no new seed. Its CDHashes must still be in
   the image's `overlay/userland/owner-trust.json`.
 - The grant was not the gate for `backboardd`: `grantedProcesses` always names it. The other Metal clients are granted by default too (table below). Naming them was not enough: with both class chains adopted the sandbox decides the open, and the iPhone's profiles refused `iconservicesagent` every open (`0xe00002e2`, the home screen without icons). `0033-gpu-grant-decides.patch`: the grant decides for the processes it names; the rest are the sandbox's, as before.

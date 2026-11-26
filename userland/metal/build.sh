@@ -19,7 +19,7 @@
 #   NativeAdrenoMetal           external/NativeMetal b0d6a07: the plug-in and the Metal frontend, linked with the bridge
 #                               (GpuScanoutPresenter.h includes the wire header of external/NativeMobileDisplay)
 #   -> out/userland/NativeAdrenoMetal.bundle (Info.plist, NativeAdrenoMetal, libvulkan_freedreno.dylib, oneios-target)
-#      out/userland/NativeAdrenoMetal.gpuaddon: the bundle as the kernel.kc.gpuaddon sidecar (build.sh addon makes it alone)
+#      out/userland/NativeAdrenoMetal.gpuaddon and .gpuaddon.cdhashes: the boot sidecar and its owner-trust hashes
 #      out/userland/NativeAdrenoMetal.build.json: the SDK and stubs used, the pins, sizes and CDHashes
 #
 # How: the kernel base's own build scripts (Droid-VM-UniXNU scripts/build-turnip-darwin.py, build-adreno-metal-bridge.py,
@@ -269,8 +269,17 @@ finish() {
 # image's overlay/userland/owner-trust.json all the same; this is for changing the plug-in without a new Data seed.
 addon() {
   local bundle=$OUT/NativeAdrenoMetal.bundle
-  [ -f "$bundle/NativeAdrenoMetal" ] || { echo "metal: no bundle in $OUT: run the build first" >&2; exit 1; }
-  "$ONEIOS_TOOL" ios gpuaddon "$bundle" "$OUT/NativeAdrenoMetal.gpuaddon"
+  [ -s "$bundle/NativeAdrenoMetal" ] && [ -s "$bundle/libvulkan_freedreno.dylib" ] && [ -s "$bundle/oneios-target" ] || {
+    echo "metal: incomplete bundle in $OUT: run the build first" >&2
+    exit 1
+  }
+  [ "$(cat "$bundle/oneios-target")" = "$TARGET_ID" ] || {
+    echo "metal: bundle target does not match $TARGET_ID in $bundle/oneios-target" >&2
+    exit 1
+  }
+  # `phone addon` needs the .cdhashes companion to update owner-trust.json. `ios addon` writes the same NGPUADD2
+  # bundle payload as `ios gpuaddon`, and writes every packaged Mach-O's CDHash beside it.
+  "$ONEIOS_TOOL" ios addon "$OUT/NativeAdrenoMetal.gpuaddon" --metal "$bundle"
 }
 
 say "SDK $IOS_SDK_VERSION ($IOS_SDK); stubs $([ -f "$IOS_TBD/usr/lib/libSystem.B.tbd" ] && echo "$IOS_TBD" || echo "none: the SDK's own"); target $IOS_TARGET"
