@@ -215,7 +215,7 @@ jobs:
           addon=out/metal-guest/NativeAdrenoMetal.gpuaddon
           record=out/metal-guest/NativeAdrenoMetal.build.json
           manifest=out/metal-guest/NativeAdrenoMetal.sha256
-          for file in "$bundle/NativeAdrenoMetal" "$bundle/libvulkan_freedreno.dylib" "$bundle/oneios-target" "$addon" "$record" "$manifest" out/metal-guest/camera/H9ISP.mediacapture; do
+          for file in "$bundle/NativeAdrenoMetal" "$bundle/libvulkan_freedreno.dylib" "$bundle/oneios-target" "$addon" "$addon.cdhashes" "$record" "$manifest" out/metal-guest/camera/H9ISP.mediacapture; do
             [ -s "$file" ] || { echo "::error::Required Metal artifact is missing or empty: $file"; exit 1; }
           done
           sed 's#out/userland/#out/metal-guest/#g' "$manifest" | sha256sum --check --strict -
@@ -229,6 +229,7 @@ jobs:
         env:
           METAL_DIR: out/metal-guest
           CAMERA_DIR: out/metal-guest/camera
+          ONEIOS_GPUADDON: out/metal-guest/NativeAdrenoMetal.gpuaddon
           REQUIRE_METAL: '1'
         run: runtime/package.sh "$VERSION"
       - name: The package's xnuhost and gpuctl have drm2kgsl
@@ -253,10 +254,12 @@ jobs:
           set -euo pipefail
           a=out/release/oneios-runtime-$VERSION-arm64.tar.zst
           ( cd out/release && sha256sum -c "$(basename "$a").sha256" )
-          zstd -dc "$a" | tar -t | tee members.txt | grep -Ev '^(runtime\.json|NOTICE|LICENSE|(bin|lib|scripts)/[^/].*|kernel/([0-9A-Z]+/)?xnu\.macho(\.build\.json)?)$' && { echo "::error::the package has members outside the runtime's folders (above)"; exit 1; }
+          zstd -dc "$a" | tar -t | tee members.txt | grep -Ev '^(runtime\.json|NOTICE|LICENSE|(bin|lib|scripts)/[^/].*|kernel/([0-9A-Z]+/)?xnu\.macho(\.build\.json)?|kernel/gpuaddon(\.cdhashes)?)$' && { echo "::error::the package has members outside the runtime's folders (above)"; exit 1; }
           [ "$(head -n 1 members.txt)" = runtime.json ] || { echo "::error::runtime.json is not the first member"; exit 1; }
           grep -qx 'lib/guest/NativeAdrenoMetal.bundle/NativeAdrenoMetal' members.txt || { echo "::error::runtime has no Metal executable"; exit 1; }
           grep -qx 'lib/guest/camera/H9ISP.mediacapture' members.txt || { echo "::error::runtime has no capture plug-in"; exit 1; }
+          grep -qx 'kernel/gpuaddon' members.txt || { echo "::error::runtime has no packaged GPU boot add-on"; exit 1; }
+          grep -qx 'kernel/gpuaddon.cdhashes' members.txt || { echo "::error::runtime has no GPU add-on trust hashes"; exit 1; }
           zstd -dc "$a" | tar -xO runtime.json > runtime.json
           jq -e '.metal.target == "iPhone18,2 24A446" and .camera.path == "lib/guest/camera"' runtime.json >/dev/null || { echo "::error::runtime manifest does not name the expected Metal and camera plug-ins"; exit 1; }
           echo "$(wc -l < members.txt) members, runtime.json first"

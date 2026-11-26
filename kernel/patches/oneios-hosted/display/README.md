@@ -116,8 +116,11 @@ so those archives keep their own names.
   (`sheng-vsync-min=HZ`, default 60 in `OneiOSDisplay.cpp`; 24 or 0 gives the family's 1/24 s back), staged into
   `NativeLegacyDisplay.cpp` by `oneios-tool kernel build-oneios-display` (`staged/display.rs` LEGACY): with 24 Hz on
   offer Core Animation ran light animations at 24-40 Hz (UniXNU-zizhan's reading of its frames). The kernel says
-  `oneios-display: refresh range 60..120 Hz` once. `sheng-vsync-fixed=1` reports one fixed rate instead. With no boot argument at
-  all (a kernel started without xnuhost's) the tick is 60 Hz and the family's 1/60 s stays. The tick with a
+  `oneios-display: refresh range 60..120 Hz` once. Above 60 Hz xnuhost adds `sheng-vsync-fixed=1`; the staged kernel
+  patch reads it and reports the panel's single rate instead, so CoreAnimation cannot choose 30 Hz from the panel's
+  24..120 Hz range. `sheng-vsync-fixed=0`
+  keeps the range. With no boot argument at all (a kernel started without xnuhost's) the tick is 60 Hz and the family's
+  1/60 s stays. The tick with a
   client, and what backboardd makes of the properties, have not run.
 - **Swaps.** A swap is accepted when it is one full-panel, untransformed surface in B,G,R,A (or Apple's `&BGA`
   spelling, or half-float `RGhA`), or a blank frame. An accepted B,G,R,A frame is offered to the virtio scanout,
@@ -129,8 +132,9 @@ so those archives keep their own names.
 
 Switches (boot arguments; an absent one has the value shown while the display is on):
 `oneios-display=1` (0: no display at all, the console only), `oneios-display-wide=0` (1: half-float frames to the
-scanout as they are; xnuhost passes it with `display-format=rgba16f`), `offline-legacy-unit-scale=3`, `sheng-vsync=60` (xnuhost
-always passes these two, from its `scale` and the panel's rate, unless the command line already has them), and
+scanout as they are; xnuhost passes it with `display-format=rgba16f`), `offline-legacy-unit-scale=3`, `sheng-vsync=60`,
+`sheng-vsync-fixed=1` above 60 Hz (xnuhost passes these three, from its `scale` and the panel's rate, unless the command
+line already has them; 0: the variable range from `sheng-vsync-min`, 60..120 Hz by default, or 24..120 with min=24), and
 Droid-VM's stages, which there is no reason to change: `offline-mobile-graphics-load`, `offline-legacy-register`,
 `offline-legacy-gop`, `offline-legacy-phase=4`, `offline-legacy-pm`, `offline-legacy-validate`,
 `offline-legacy-transfer`, `offline-legacy-cpu-present`.

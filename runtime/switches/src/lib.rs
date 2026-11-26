@@ -516,8 +516,18 @@ pub const SWITCHES: &[Switch] = &[
             arg("sheng-vsync-min", Kind::Int { min: 24, max: 120 }, "60", Some("24")),
             "Display",
             "Lowest refresh rate (Hz)",
-            "Above 60 Hz the display reports a 60..120 Hz range, so light animations are not dropped to 24-40 Hz. 24 \
-             (or 0): the 24..120 range, as before.",
+            "With sheng-vsync-fixed=0, 60 reports a 60..120 Hz range and 24 (or 0) restores 24..120 Hz. The fixed-rate \
+             default above 60 Hz overrides this range unless explicitly set to 0.",
+        )
+    },
+    Switch {
+        auto: Some("xnuhost adds 1 above 60 Hz unless the boot arguments name sheng-vsync-fixed"),
+        ..text(
+            arg("sheng-vsync-fixed", BOOL, "1", Some("0")),
+            "Display",
+            "Keep animations at panel rate",
+            "1: above 60 Hz, report one fixed panel rate so CoreAnimation cannot select 30 Hz from the 24..120 Hz range. \
+             0: keep the variable range for an A/B comparison.",
         )
     },
     Switch {

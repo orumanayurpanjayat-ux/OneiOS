@@ -256,14 +256,16 @@ impl Session {
         // addon read here is kept for the GPU's choice and the kernel's sidecar below.
         let node = if config.gpu_node.is_empty() { gpu3d_amdgpu::DEFAULT_NODE } else { config.gpu_node.as_str() };
         let kgsl = std::path::Path::new("/dev/kgsl-3d0").exists();
-        let mut addon_read: Option<Option<Vec<u8>>> = None;
+        let mut addon_read: Option<Option<crate::addon::Addon>> = None;
         let early_2d = gpu3d_amdgpu::early_2d(
             config.gpu == Gpu::Auto,
             kgsl,
             !kgsl && config.gpu == Gpu::Auto && gpu3d_amdgpu::node_check(&gpu3d_amdgpu::System, node).is_ok(),
             || {
-                let addon = sidecar(&config.kernel, "gpuaddon", 64 << 20);
-                let found = gpu3d_amdgpu::plugin_in_addon(addon.as_deref(), None);
+                let addon = sidecar(&config.kernel, "gpuaddon", 64 << 20)
+                    .map(|blob| crate::addon::Addon { blob, cdhashes: Vec::new() })
+                    .or_else(|| crate::addon::runtime_addon(&config.runtime));
+                let found = gpu3d_amdgpu::plugin_in_addon(addon.as_ref().map(|a| a.blob.as_slice()), None);
                 addon_read = Some(addon);
                 found
             },
@@ -595,8 +597,15 @@ impl Session {
                 if kgsl { Err(String::new()) } else { gpu3d_amdgpu::node_check(&*sys, node) },
                 || {
                     // the layout's read when it made one (an amdgpu host), else now
-                    let addon = addon_read.take().unwrap_or_else(|| sidecar(&kernel, "gpuaddon", 64 << 20));
-                    let found = gpu3d_amdgpu::plugin_in_addon(addon.as_deref(), build.as_deref());
+                    let addon = addon_read.take().unwrap_or_else(|| {
+                        sidecar(&kernel, "gpuaddon", 64 << 20)
+                            .map(|blob| crate::addon::Addon { blob, cdhashes: Vec::new() })
+                            .or_else(|| crate::addon::runtime_addon(&config.runtime))
+                    });
+                    let found = gpu3d_amdgpu::plugin_in_addon(
+                        addon.as_ref().map(|a| a.blob.as_slice()),
+                        build.as_deref(),
+                    );
                     addon_read = Some(addon);
                     found
                 },
@@ -653,7 +662,7 @@ impl Session {
                             // OpenGL ES for CoreAnimation (docs/a56-gpu.md 4a): when the same gpuaddon carries the
                             // A56's GL bundle, the kernel names it for every process (oneios-gpu-amd-gl=1) and the
                             // render server composites on it; without it, CPU composition as before.
-                            let addon = addon_read.as_ref().and_then(|a| a.as_deref());
+                            let addon = addon_read.as_ref().and_then(|a| a.as_ref().map(|a| a.blob.as_slice()));
                             match gpu3d_amdgpu::gl_in_addon(addon, build.as_deref()) {
                                 // a kernel that does not read the switch (an A56 kernel before 5966e71ce2aa) would
                                 // name no GL driver for SpringBoard, whose CoreImage then needs the fixup: no GL
@@ -845,20 +854,34 @@ impl Session {
         // read once: the GPU's choice may have read it already (an amdgpu host)
         let addon = match addon_read.take() {
             Some(addon) => addon,
-            None => sidecar(&config.kernel, "gpuaddon", 64 << 20),
+            None => sidecar(&config.kernel, "gpuaddon", 64 << 20)
+                .map(|blob| crate::addon::Addon { blob, cdhashes: Vec::new() })
+                .or_else(|| crate::addon::runtime_addon(&config.runtime)),
         };
         let policies = sidecar(&config.kernel, "vroot", 128 << 20);
         // Apple's trust caches of the set (IM4P) and the owner module, as the sidecar the kernel takes, unless one is
         // shipped.
-        if let Some(set) =
-            self.image_set.as_ref().filter(|s| trust.is_none() && s.find("trust/static.trustcache").is_some())
-        {
-            let blob = set.trustcaches().map_err(|e| {
+        let extra = addon.as_ref().map_or(&[][..], |a| a.cdhashes.as_slice());
+        if let Some(existing) = trust.take() {
+            if !extra.is_empty() {
+                let blob = crate::imageset::trustcaches_sidecar_trusting(&existing, extra).map_err(|e| {
+                    loge!("trust caches of {}: {}", config.kernel, e);
+                    BootFailed
+                })?;
+                logi!("trust caches: added {} runtime add-on CDHashes to the kernel sidecar", extra.len());
+                trust = Some(blob);
+            } else {
+                trust = Some(existing);
+            }
+        } else if let Some(set) = self.image_set.as_ref().filter(|s| s.find("trust/static.trustcache").is_some()) {
+            let blob = set.trustcaches_trusting(extra).map_err(|e| {
                 loge!("trust caches of {}: {}", config.image, e);
                 BootFailed
             })?;
             logi!("trust caches: {} modules from the image set, {} bytes", blob[0], blob.len());
             trust = Some(blob);
+        } else if !extra.is_empty() {
+            loge!("gpuaddon: no trust-cache source is available for its {} CDHashes", extra.len());
         }
         // The root: the OS volume, matched by its APFS volume UUID.
         machine.root_volume_uuid = self
@@ -935,7 +958,7 @@ impl Session {
             legacy_boot_args: config.legacy_boot_args,
             ramdisk: ramdisk.as_deref(),
             trustcache: trust.as_deref(),
-            gpu_addon: addon.as_deref(),
+            gpu_addon: addon.as_ref().map(|a| a.blob.as_slice()),
             root_policies: policies.as_deref(),
         };
         // SAFETY: the kernel's window, `window` bytes mapped at m.host (mem::map), is the guest's RAM; no vCPU runs yet
