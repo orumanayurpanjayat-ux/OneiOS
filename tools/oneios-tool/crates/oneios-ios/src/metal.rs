@@ -146,6 +146,15 @@ pub fn stage_edit(root: &Path, hooks: &Path, jobs: &str, knows: bool, rt: bool) 
     if s(&hooks, "target")? == "iPhone10,3 20F66" {
         edit(
             root,
+            "drivers/AdrenoMetal/NativeBridgeMetalFrontend.mm",
+            &[(
+                "(NSUInteger)MTLLanguageVersion3_1",
+                "(NSUInteger)MTLLanguageVersion3_0".into(),
+                "the default Metal language version available on iOS 16.5",
+            )],
+        )?;
+        edit(
+            root,
             "scripts/build-turnip-darwin.py",
             &[
                 (
