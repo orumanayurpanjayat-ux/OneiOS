@@ -863,7 +863,7 @@ impl Session {
         if self.image_set.as_ref().is_some_and(|s| s.build == "20F66")
             && config.host.is_some_and(|host| host.0.name == "galaxy-s24-ultra")
             && kgsl
-            && gpu.is_some()
+            && have_3d
             && !config.given("boot-args")
         {
             match addon.as_ref().map(|a| crate::addon::native_adreno_metal_20f66(&a.blob)) {
@@ -1124,3 +1124,4 @@ mod tests {
         assert!(add_boot_arg(&mut args, "oneios-pen=1").is_ok() && args == "a=1 b oneios-pen=1");
     }
 }
+

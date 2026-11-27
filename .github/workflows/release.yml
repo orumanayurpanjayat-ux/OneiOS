@@ -7,8 +7,8 @@
 #   release only for a tag or a manual dispatch
 #
 # Triggers: a pull request or a push to main / codex/s24u-ios16 builds the applicable products and releases nothing.
-# The S24 iOS 16.5 branch builds its own 20F66 Metal target plus the APK. Other runtime builds use the iOS 27 Metal
-# target. A tag vN.N.N[-suffix] on main builds
+# The S24 iOS 16.5 branch reuses the verified iPhone X 20F66 Metal artifact from run 46043899246; it does not rebuild
+# Metal on every code change. Other runtime builds use the iOS 27 Metal target. A tag vN.N.N[-suffix] on main builds
 # both and releases both. A dispatch (Actions, "build and release", Run workflow) on main takes a version,
 # "both", "runtime only" or "apk only", and optionally a successful `metal-plugin` run ID to reuse.
 # The runtime job never checks out app/: the fork's tree cannot reach the package. The iOS 16 Metal job downloads
@@ -34,7 +34,7 @@ on:
         options: [both, runtime only, apk only]
         default: both
       metal_run_id:
-        description: 'Optional successful metal-plugin run ID to reuse its iPhone18,2 24A446 artifact instead of rebuilding it'
+        description: 'Optional successful compatible Metal artifact run ID to reuse instead of rebuilding Metal'
         required: false
         type: string
 permissions:
@@ -85,28 +85,46 @@ jobs:
             case "$IN_BUILD" in both) ;; "runtime only") apk=false ;; "apk only") runtime=false ;;
               *) echo "::error::build '$IN_BUILD' is not both, runtime only or apk only"; exit 1 ;; esac
           fi
-          # This branch's guest is the iPhone X iOS 16.5 image (20F66): build a plain ARM64 plug-in for that guest.
-          # Other branches keep the existing iOS 27 arm64e target. The 20F66 capture plug-in is not ported yet.
-          if { [ "$EVENT" = push ] && [ "$REF_NAME" = codex/s24u-ios16 ]; } ||
-             { [ "$EVENT" = pull_request ] && [ "$BASE_REF" = codex/s24u-ios16 ]; }; then
+          # This branch's guest is iPhone X iOS 16.5 (20F66): reuse its previously built ARM64 plug-in. Other branches
+          # keep the existing iOS 27 arm64e target. The 20F66 capture plug-in is not ported yet.
+          if [ "$REF" = refs/heads/codex/s24u-ios16 ] || [ "$BASE_REF" = codex/s24u-ios16 ]; then
             metal_target='iPhone10,3 20F66'
             metal_artifact=NativeAdrenoMetal-20F66
-            echo "S24 iOS 16.5 branch: building the separate ARM64 Metal plug-in for iPhone X 20F66."
+            [ -n "$metal_run_id" ] || metal_run_id=46043899246
+            echo "S24 iOS 16.5 branch: reusing the verified iPhone X 20F66 Metal artifact from run $metal_run_id."
           fi
           if [ -n "$metal_run_id" ]; then
-            [ "$metal_target" = 'iPhone18,2 24A446' ] || { echo "::error::metal_run_id reuse is only supported for the default iOS 27 plug-in"; exit 1; }
-            [ "$EVENT" = workflow_dispatch ] || { echo "::error::metal_run_id is only accepted on a workflow dispatch"; exit 1; }
-            [[ "$IN_BUILD" != "apk only" ]] || { echo "::error::metal_run_id cannot be used with an APK-only build"; exit 1; }
             [[ "$metal_run_id" =~ ^[0-9]+$ ]] || { echo "::error::metal_run_id must be a numeric Actions run ID"; exit 1; }
-            workflow_id=$(gh api "repos/$REPO/actions/workflows/metal-plugin.yml" --jq .id)
             run=$(gh api "repos/$REPO/actions/runs/$metal_run_id")
-            jq -e --argjson workflow_id "$workflow_id" --arg repo "$REPO" '
-              .workflow_id == $workflow_id and .event == "workflow_dispatch" and
-              .status == "completed" and .conclusion == "success" and .head_branch == "main" and
-              .head_repository.full_name == $repo
-            ' <<< "$run" >/dev/null || { echo "::error::run $metal_run_id is not a successful manual metal-plugin run from this repository's main branch"; exit 1; }
-            artifacts=$(gh api "repos/$REPO/actions/runs/$metal_run_id/artifacts" --jq '[.artifacts[] | select(.name == "NativeAdrenoMetal" and .expired == false)] | length')
-            [ "$artifacts" = 1 ] || { echo "::error::run $metal_run_id has no live NativeAdrenoMetal artifact"; exit 1; }
+            if [ "$metal_target" = 'iPhone10,3 20F66' ]; then
+              [ "$metal_run_id" = 46043899246 ] || { echo "::error::the iOS 16 branch is pinned to verified Metal artifact run 46043899246"; exit 1; }
+              # The reused run may itself have failed later in the runtime job; require its Metal job, not the entire
+              # workflow, to have succeeded. This avoids rerunning Apple's/toolchain download for the known artifact.
+              jq -e --arg repo "$REPO" '
+                .path == ".github/workflows/release.yml" and .head_branch == "codex/s24u-ios16" and
+                .status == "completed" and .head_repository.full_name == $repo
+              ' <<< "$run" >/dev/null || { echo "::error::run $metal_run_id is not a completed image-branch workflow run from this repository"; exit 1; }
+              jobs=$(gh api "repos/$REPO/actions/runs/$metal_run_id/jobs")
+              jq -e '[.jobs[] | select(.name == "metal / build" and .conclusion == "success")] | length == 1' \
+                <<< "$jobs" >/dev/null || { echo "::error::run $metal_run_id has no successful iOS 16 Metal build job"; exit 1; }
+            else
+              [ "$EVENT" = workflow_dispatch ] || { echo "::error::metal_run_id for iOS 27 is only accepted on a workflow dispatch"; exit 1; }
+              [[ "$IN_BUILD" != "apk only" ]] || { echo "::error::metal_run_id cannot be used with an APK-only build"; exit 1; }
+              workflow_id=$(gh api "repos/$REPO/actions/workflows/metal-plugin.yml" --jq .id)
+              jq -e --argjson workflow_id "$workflow_id" --arg repo "$REPO" '
+                .workflow_id == $workflow_id and .event == "workflow_dispatch" and
+                .status == "completed" and .conclusion == "success" and .head_branch == "main" and
+                .head_repository.full_name == $repo
+              ' <<< "$run" >/dev/null || { echo "::error::run $metal_run_id is not a successful manual metal-plugin run from this repository's main branch"; exit 1; }
+            fi
+            artifact=$(gh api "repos/$REPO/actions/runs/$metal_run_id/artifacts" --jq --arg artifact "$metal_artifact" '[.artifacts[] | select(.name == $artifact and .expired == false)] | if length == 1 then .[0] else empty end')
+            [ -n "$artifact" ] || { echo "::error::run $metal_run_id has no unique live $metal_artifact artifact"; exit 1; }
+            if [ "$metal_target" = 'iPhone10,3 20F66' ]; then
+              [ "$(jq -r .id <<< "$artifact")" = 15222288592 ] &&
+              [ "$(jq -r .digest <<< "$artifact")" = 'sha256:aba4b438290166d1a607f7d3b6857bef1d2e0ba16686f7f9850ffd955d298874' ] || {
+                echo "::error::the pinned iOS 16 Metal artifact ID or SHA-256 changed"; exit 1;
+              }
+            fi
           fi
           if [ "$release" = true ]; then
             [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.]*)?$ ]] || { echo "::error::version '$version' is not N.N.N[-suffix]"; exit 1; }
@@ -552,3 +570,4 @@ jobs:
           done
           [ ${#up[@]} = 0 ] || gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "${up[@]}"
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets --jq '.url, (.assets[] | "  \(.name) \(.size)")'
+
