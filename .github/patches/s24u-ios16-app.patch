@@ -828,6 +828,15 @@ index 9d0a974..e8983fa 100644
          val bid = "xnu-12377.121.6-ios-27.0.1-24A446-abcdef012345"
          val xnu = ByteArray(100) { it.toByte() }
          val tool = OneiosScriptTest::class.java.getResourceAsStream("/oneios/a56gpu-tool.sh")!!.readBytes()
+@@ -2554,5 +2568,7 @@ class OneiosScriptTest {
+         assertEquals("3398400", maxOf(f, 7))
+         assertEquals("2265600", maxOf(f, 0))
+         // A cell reading that is not a number keeps the level; a case that is not one is only "?" in the lines.
+-        f.file("sys/class/power_supply/battery/temp").writeText("busy\n")
++        val badTemp = f.file("sys/class/power_supply/battery/.temp")
++        badTemp.writeText("busy\n")
++        assertTrue(badTemp.renameTo(f.file("sys/class/power_supply/battery/temp")))
+         await("the cap's line on the reading") { capLog(f).contains("the cell's reading is not a number (cell 'busy', case '330'): the level stays 0") }
 diff --git a/docs/oneios.md b/docs/oneios.md
 index ffac94b..268cccd 100644
 --- a/docs/oneios.md
