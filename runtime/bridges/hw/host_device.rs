@@ -86,7 +86,8 @@ const NONE: &[&str] = &[];
 // a SoC or platform match alone means "this SoC's entry" (the S24 and S24+ on SM8650 get the S24 Ultra's: no change).
 static TABLE: [HostDevice; 5] = [
     // The home device. [F] SM-S928*, e3q, SM8650 (verify-host.sh, the OneOS fork's gate); platform pineapple [F] (the
-    // stock device tree, qcom/pineapple-v2.dts, docs/hardware.md). No defaults: everything is today's.
+    // stock device tree, qcom/pineapple-v2.dts, docs/hardware.md). The iOS 16.5 runtime's display/GPU defaults below
+    // adapt its A56-derived image set; unverified host controls stay at today's defaults.
     // The model prefix takes every S24 Ultra model number (docs/hardware.md 7h, "The S24 Ultra's models"; the record
     // profiles/host-galaxy-s24-ultra-sm8650.toml): SM-S928B (the owner's phone [F]), SM-S928U and SM-S928U1 (US),
     // SM-S928W (Canada, CSC XAC), SM-S928N (Korea), SM-S9280 (China).
@@ -104,7 +105,11 @@ static TABLE: [HostDevice; 5] = [
         devices: &["e3q"],
         socs: &["SM8650"],
         platforms: &["pineapple"],
-        config: NONE,
+        // A 20F66 image set is built for the A56. Its frame and rate are image defaults, not the S24 Ultra's panel:
+        // use the S24's native portrait mode and let its KGSL-backed Adreno renderer run when available. Explicit
+        // command-line settings still win in xnuhost's merge. ASTC stays image-controlled until SnapshotFormat.inc is
+        // in the guest plug-in (docs/gpu.md).
+        config: &["gpu=auto", "panel-fallback=1440x3120@120", "width=1440", "height=3120", "scale=3", "hz=120"],
         env: NONE,
         takeover: true,
     },

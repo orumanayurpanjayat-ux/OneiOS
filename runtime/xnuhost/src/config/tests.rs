@@ -965,6 +965,39 @@ fn boot_argument_helpers() {
 }
 
 #[test]
+fn s24_display_boot_args_replace_the_copied_a56_rate_and_scale_once() {
+    let mut args = "-v offline-legacy-unit-scale=2 sheng-vsync=60 sheng-vsync-fixed=0 sheng-vsync=60".to_owned();
+    assert!(s24_display_boot_args(&mut args, "", 128, 3, 120).is_ok());
+    assert_eq!(args, "-v offline-legacy-unit-scale=3 sheng-vsync=120 sheng-vsync-fixed=1");
+    assert_eq!(args.matches("offline-legacy-unit-scale=").count(), 1);
+    assert_eq!(args.matches("sheng-vsync=").count(), 1);
+    assert_eq!(args.matches("sheng-vsync-fixed=").count(), 1);
+    let mut short = "-v offline-legacy-unit-scale=2 sheng-vsync=60".to_owned();
+    let before = short.clone();
+    assert!(s24_display_boot_args(&mut short, before.len() + 1, 3, 120).is_err());
+    assert_eq!(short, before); // no partial policy change when the boot-argument buffer is too small
+}
+
+#[test]
+fn s24_display_boot_args_keep_explicit_display_additions_only_when_applied() {
+    let mut args = "-v offline-legacy-unit-scale=2 sheng-vsync=90 sheng-vsync-fixed=0".to_owned();
+    assert!(s24_display_boot_args(
+        &mut args,
+        "sheng-vsync=90 sheng-vsync-fixed=0 oneios-gpu-metal=1",
+        128,
+        3,
+        120
+    )
+    .is_ok());
+    assert_eq!(args, "-v offline-legacy-unit-scale=3 sheng-vsync=90 sheng-vsync-fixed=0");
+
+    // An image's A56 value beats a conflicting boot-args-add word, so the S24 profile still corrects that default.
+    let mut args = "-v offline-legacy-unit-scale=2 sheng-vsync=60 sheng-vsync-fixed=0".to_owned();
+    assert!(s24_display_boot_args(&mut args, "sheng-vsync=90", 128, 3, 120).is_ok());
+    assert_eq!(args, "-v offline-legacy-unit-scale=3 sheng-vsync=120 sheng-vsync-fixed=1");
+}
+
+#[test]
 fn display_mode() {
     let dir = testdir("display");
     let image = image_set(&dir, "image");
@@ -1117,8 +1150,8 @@ fn display_mode() {
 }
 
 // ---- the host phone (onebridges::hw, host_device_layer; docs/hardware.md "The host device") -------------------------
-// Each known phone's defaults under the command line and the image set, an unknown phone, a forced one, detection off;
-// and the proof that the S24 Ultra's entry and an unknown phone finish to exactly the config of detection off (today's).
+// Each known phone's defaults under the command line and the image set, an unknown phone, a forced one and detection off;
+// the S24 Ultra's profile is distinct, while an unknown phone keeps today's detection-off config.
 
 fn host_props(dir: &Path, name: &str, model: &str, soc: &str) -> String {
     let path = dir.join(format!("{name}.props"));
@@ -1184,18 +1217,37 @@ fn host_device() {
     assert!(off.host.is_none() && off.host_line == "host: detection off (host-device=none): today's defaults");
     assert!(off.gpu == Gpu::Auto && off.hw == HwSettings::default());
     let off = host_clear(off);
-    // The S24 Ultra (the home device) and an unknown phone: byte for byte today's config.
+    // The S24 Ultra (the home device) uses its native display profile; an unknown phone keeps today's defaults.
     let props = host_props(&dir, "s24u", "SM-S928B", "SM8650");
     let c = rig.finish(Some(&props), None, None).unwrap();
     assert!(c.host == find("galaxy-s24-ultra"));
     assert!(c.host_line.contains(
         "host: galaxy-s24-ultra (Galaxy S24 Ultra (SM-S928, SM8650)), matched by ro.product.model=SM-S928B; read: "
     ));
-    assert!(c.host_line.contains("; defaults: none (today's)"));
-    assert_eq!(host_clear(c), off);
+    assert!(c.host_line.contains(
+        "; defaults: gpu=auto, panel-fallback=1440x3120@120, width=1440, height=3120, scale=3, hz=120"
+    ));
+    assert!(c.gpu == Gpu::Auto && c.width == 1440 && c.height == 3120 && c.scale == 3 && c.hz == 120);
+    assert_eq!(c.panel_fallback, Some(PanelMode { width: 1440, height: 3120, hz: 120 }));
+    let s24_defaults = host_clear(c);
     let c = rig.finish(Some(&props), Some("galaxy-s24-ultra"), None).unwrap();
     assert!(c.host_line.contains("host-device=galaxy-s24-ultra (forced)"));
-    assert_eq!(host_clear(c), off);
+    assert_eq!(host_clear(c), s24_defaults);
+    // The iOS 16.5 A56 image's 720x1560 @2x, 60 Hz and gpu=2d must not leak onto the S24 Ultra.
+    let conf = format!("{image}/xnuhost.conf");
+    write(
+        &conf,
+        "gpu=2d\npanel-fallback=1080x2340@120\nwidth=720\nheight=1560\nscale=2\nhz=60\nastc=0\nboot-args=-v offline-legacy-unit-scale=2 sheng-vsync=60 sheng-vsync-fixed=0\n",
+    );
+    let c = rig.finish(Some(&props), None, None).unwrap();
+    assert!(c.gpu == Gpu::Auto && c.width == 1440 && c.height == 3120 && c.scale == 3 && c.hz == 120);
+    assert_eq!(c.panel_fallback, Some(PanelMode { width: 1440, height: 3120, hz: 120 }));
+    assert!(!c.astc); // the image's ASTC opt-out stays until the guest plug-in supports its snapshot format
+    assert!(c.host_line.contains("width=1440") && !c.host_line.contains("width=1440 not taken"));
+    assert_eq!(rig.finish(Some(&props), None, Some("hz=60")).unwrap().hz, 60);
+    assert_eq!(rig.finish(Some(&props), None, Some("gpu=2d")).unwrap().gpu, Gpu::TwoD);
+    assert_eq!(rig.finish(Some(&props), None, Some("width=720")).unwrap().width, 720);
+    fs::remove_file(&conf).unwrap();
     let props = host_props(&dir, "pixel", "Pixel 11 Pro", "Tensor G5");
     let c = rig.finish(Some(&props), None, None).unwrap();
     assert!(c.host.is_none());

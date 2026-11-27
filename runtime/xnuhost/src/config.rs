@@ -429,6 +429,8 @@ macro_rules! take {
 
 /// The keys whose being given decides a merge or a default ([`Config::given`]).
 const GIVEN_KEYS: &[&str] = &[
+    "boot-args",
+    "boot-args-add",
     "gpu",
     "gpu-level",
     "gpu-priority",
@@ -1381,8 +1383,19 @@ impl Config {
         if self.selftest {
             return Ok(());
         }
-        // The host phone's defaults (onebridges::hw), under both: the command line > the image set > the table > built in.
+        // The host phone's defaults (onebridges::hw), under both: normally command line > image set > table > built in;
+        // the S24's iOS 16 profile treats copied A56 display/GPU values as image-target defaults instead.
         let device = self.host_device_layer(&image)?;
+        // The A56's iOS 16.5 image set carries an A56-sized frame and a 60 Hz default. On the S24 Ultra those are
+        // properties of the image's build target, not this phone: use the S24 host profile unless the command line
+        // explicitly chooses a display mode. This also keeps an image's gpu=2d from disabling the S24's KGSL path.
+        let s24_profile = self.host.is_some_and(|host| host.0.name == "galaxy-s24-ultra");
+        let s24_frame_profile = s24_profile
+            && !self.given("width")
+            && !self.given("height")
+            && !self.given("scale")
+            && self.width == 0
+            && self.height == 0;
         // session-mode=takeover (docs/booter.md 2.9d): only in the OneOS session, only where the host table allows it (the
         // switch asked --host-info before it stopped One UI; this is the same rule, for a command line that did not), and
         // with input: it turns the native touchscreen's grab on unless touch-exclusive= was given.
@@ -1408,7 +1421,13 @@ impl Config {
             }
         }
         if !self.given("gpu") {
-            self.gpu = if image.given("gpu") { image.gpu } else { device.gpu };
+            self.gpu = if s24_profile && device.given("gpu") {
+                device.gpu
+            } else if image.given("gpu") {
+                image.gpu
+            } else {
+                device.gpu
+            };
         }
         if self.gpu_node.is_empty() {
             self.gpu_node = image.gpu_node.clone();
@@ -1417,7 +1436,7 @@ impl Config {
             self.boot_args = image.boot_args.clone();
         }
         if self.width == 0 {
-            self.width = image.width;
+            self.width = if s24_frame_profile && device.given("width") { device.width } else { image.width };
         }
         take!(self, image, "setway-skip", setway_skip);
         take!(self, image, "blk-late-flush", blk_late_flush);
@@ -1462,23 +1481,36 @@ impl Config {
             ));
         }
         if self.height == 0 {
-            self.height = image.height;
+            self.height = if s24_frame_profile && device.given("height") { device.height } else { image.height };
         }
         if self.hz == 0 {
-            self.hz = image.hz;
+            self.hz = if s24_profile && device.given("hz") { device.hz } else { image.hz };
         }
         if self.hz == 0 {
             self.hz = device.hz; // the host phone's rate (the galaxy-a56 row: 60, the fork's CPU-composited A56)
         }
         // panel-fallback: the command line's, else the image set's, else the host phone's
-        self.panel_fallback = self.panel_fallback.or(image.panel_fallback).or(device.panel_fallback);
+        self.panel_fallback = self
+            .panel_fallback
+            .or_else(|| {
+                if s24_profile && device.given("panel-fallback") {
+                    device.panel_fallback
+                } else {
+                    image.panel_fallback
+                }
+            })
+            .or(device.panel_fallback);
         take!(self, image, "display-direct", display_direct);
         take!(self, image, "display-format", display_format);
         // The KMS back end scans out 32-bit pixels: half floats only go to a display helper (shm) or nowhere.
         if self.display_format == DisplayFormat::Rgba16f && self.display == DisplayBackend::Drm {
             return Err(ConfigError::new("display-format=rgba16f needs --display shm"));
         }
-        take!(self, image, "scale", scale);
+        if s24_frame_profile && device.given("scale") {
+            self.scale = device.scale;
+        } else {
+            take!(self, image, "scale", scale);
+        }
         // The host phone's guest frame (width, height and its UI scale, taken as one): only where neither the command line
         // nor the image set gives a width or a height. Its scale then wins over the image set's, which is the scale of the
         // panel-sized frame roottweak made the image for, but not over the command line's. The galaxy-a56 row: 720x1560 @2x,
@@ -1770,7 +1802,21 @@ impl Config {
             if !device_key(key) || device.set(key, value).is_err() {
                 return Err(bad("not a device default xnuhost takes"));
             }
-            if self.given_above(image, &over, key, value) {
+            let s24_profile_wins_over_image = entry.name == "galaxy-s24-ultra"
+                && match key {
+                    "gpu" => !self.given("gpu") && image.given("gpu"),
+                    "panel-fallback" => self.panel_fallback.is_none() && image.panel_fallback.is_some(),
+                    "hz" => self.hz == 0 && image.hz != 0,
+                    "width" | "height" | "scale" => {
+                        self.width == 0
+                            && self.height == 0
+                            && !self.given("width")
+                            && !self.given("height")
+                            && !self.given("scale")
+                    }
+                    _ => false,
+                };
+            if self.given_above(image, &over, key, value) && !s24_profile_wins_over_image {
                 taken.push(format!("{pair} not taken (the command line or the image set gives it)"));
             } else {
                 taken.push((*pair).to_owned());
@@ -2149,6 +2195,62 @@ pub fn display_boot_args(
     if hz > 60 && !has_switch(args, "sheng-vsync-fixed") {
         append_arg(args, size, "sheng-vsync-fixed=1")?;
     }
+    Ok(())
+}
+
+/// The S24 Ultra panel profile supersedes the 60 Hz and @2x boot arguments copied into an A56 image set. Explicit
+/// command-line boot-args remain authoritative; a boot-args-add display value is retained only if it made it into the
+/// final arguments (the existing boot-args take precedence over additions).
+pub fn s24_display_boot_args(
+    args: &mut String,
+    explicit_add: &str,
+    size: usize,
+    scale: u32,
+    hz: u32,
+) -> Result<(), NoRoom> {
+    let mut next = args.clone();
+    for (name, default) in [
+        ("offline-legacy-unit-scale", scale.to_string()),
+        ("sheng-vsync", hz.to_string()),
+        ("sheng-vsync-fixed", if hz > 60 { "1" } else { "0" }.to_owned()),
+    ] {
+        let value = explicit_added_value(&next, explicit_add, name).unwrap_or(default);
+        force_boot_arg(&mut next, size, name, &value)?;
+    }
+    *args = next;
+    Ok(())
+}
+
+/// The explicit addition that actually won `add_boot_args`; an image boot argument with the same name wins over it.
+fn explicit_added_value(args: &str, add: &str, name: &str) -> Option<String> {
+    let wanted = words(add).find_map(|word| {
+        let (key, value) = word.split_once('=')?;
+        (key == name).then_some((word, value))
+    })?;
+    words(args).any(|word| word == wanted.0).then(|| wanted.1.to_owned())
+}
+
+/// Replace every existing value of `name` with one copy of `name=value`, or append it if absent. The caller's string
+/// is changed only if the entire result fits the boot-argument buffer.
+fn force_boot_arg(args: &mut String, size: usize, name: &str, value: &str) -> Result<(), NoRoom> {
+    let wanted = format!("{name}={value}");
+    let mut next = String::new();
+    let mut replaced = false;
+    for word in words(args) {
+        let word_name = word.split_once('=').map_or(word, |(key, _)| key);
+        if word_name == name {
+            if !replaced {
+                append_arg(&mut next, size, &wanted)?;
+                replaced = true;
+            }
+        } else {
+            append_arg(&mut next, size, word)?;
+        }
+    }
+    if !replaced {
+        append_arg(&mut next, size, &wanted)?;
+    }
+    *args = next;
     Ok(())
 }
 

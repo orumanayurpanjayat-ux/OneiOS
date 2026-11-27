@@ -867,14 +867,18 @@ impl Session {
             && !config.given("boot-args")
         {
             match addon.as_ref().map(|a| crate::addon::native_adreno_metal_20f66(&a.blob)) {
-                Some(Ok(())) => match config::ios16_enable_adreno_metal(&mut config.boot_args, config::BOOT_ARGS_SIZE) {
-                    Ok(true) => logi!("ios16: S24 Ultra: enabled the iPhone X 20F66 Adreno Metal accelerator"),
-                    Ok(false) => logi!("ios16: S24 Ultra: the iPhone X 20F66 Adreno Metal accelerator is already enabled"),
-                    Err(_) => {
-                        loge!("ios16: S24 Ultra: no room to enable the Adreno Metal accelerator");
-                        return Err(BootFailed);
+                Some(Ok(())) => {
+                    match config::ios16_enable_adreno_metal(&mut config.boot_args, config::BOOT_ARGS_SIZE) {
+                        Ok(true) => logi!("ios16: S24 Ultra: enabled the iPhone X 20F66 Adreno Metal accelerator"),
+                        Ok(false) => {
+                            logi!("ios16: S24 Ultra: the iPhone X 20F66 Adreno Metal accelerator is already enabled")
+                        }
+                        Err(_) => {
+                            loge!("ios16: S24 Ultra: no room to enable the Adreno Metal accelerator");
+                            return Err(BootFailed);
+                        }
                     }
-                },
+                }
                 Some(Err(why)) => logi!("ios16: S24 Ultra: kept oneios-gpu-metal=0; {why}"),
                 None => logi!("ios16: S24 Ultra: kept oneios-gpu-metal=0; no GPU addon is loaded"),
             }
@@ -1124,4 +1128,3 @@ mod tests {
         assert!(add_boot_arg(&mut args, "oneios-pen=1").is_ok() && args == "a=1 b oneios-pen=1");
     }
 }
-

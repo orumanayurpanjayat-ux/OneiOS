@@ -1811,6 +1811,13 @@ The `blk.rs` flush counts and times count every `fdatasync`, whichever side (vCP
   is the width times 4 (5760 bytes; 8 with `display-format=rgba16f`); the `stride` in the helper's `first frame posted` line is the layer buffer's, in
   pixels, and is whatever gralloc aligned the width to. Tested on the PC against a stand-in helper
   (the C `tests/test_display_mode.c`, now `src/display/tests.rs`); not yet run on the phone.
+  On the S24 Ultra's iOS 16.5 runtime, the host profile replaces the 20F66 image set's A56 defaults (`gpu=2d`,
+  720x1560 @2x, 60 Hz) with `gpu=auto` and a 1440x3120 @3x guest frame at 120 Hz. The Android host's KGSL renderer
+  and matching iPhone X Metal add-on remain guarded by their device and artifact checks; a renderer failure falls
+  back to 2D. Explicit command-line GPU/display settings win. The copied image boot arguments are normalized to the
+  S24 scale and fixed 120 Hz animation rate unless a full command-line `boot-args` or an applied display value from
+  command-line `boot-args-add` overrides them. ASTC remains controlled by the image set.
+
 - **The UI scale** is `scale`: 3 (default, 480x1040 points) or 2 (720x1560 points), from `--scale`/`--set
   scale=`, else `xnuhost.conf` of the image set, else its `overlay/userland/xnuhost.conf` (the userland hook's),
   else 3. The pixels are the same either way. One value goes to every place that states it:

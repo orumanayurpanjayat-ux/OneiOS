@@ -703,8 +703,23 @@ pub fn main() -> i32 {
     }
     let Ok(fb) = display::init(&config) else { return EXIT_SETUP };
     s.fb = fb;
-    // The display driver's scale, refresh rate and fixed-rate flag go on the kernel's command line (a value given
-    // there stays).
+    let s24_profile = config.host.is_some_and(|host| host.0.name == "galaxy-s24-ultra");
+    if s24_profile && !config.given("boot-args") {
+        if config::s24_display_boot_args(
+            &mut config.boot_args,
+            if config.given("boot-args-add") { &config.boot_args_add } else { "" },
+            config::BOOT_ARGS_SIZE,
+            config.scale,
+            s.fb.2,
+        )
+        .is_err()
+        {
+            loge!("no room in the boot arguments for the S24 Ultra's display profile");
+            return EXIT_SETUP;
+        }
+    }
+    // The display driver's scale, refresh rate and fixed-rate flag go on the kernel's command line (explicit values
+    // there stay; the S24 profile above replaces only the A56 image defaults).
     if config::display_boot_args(
         &mut config.boot_args,
         config::BOOT_ARGS_SIZE,
