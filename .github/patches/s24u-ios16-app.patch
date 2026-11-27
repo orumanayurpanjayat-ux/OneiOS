@@ -746,10 +746,28 @@ index 652d76d..b3ad2b5 100644
          for (st in listOf(withKernel, withKernel.copy(kb = OneiosStatus.Kb(kb.kernelcacheSha256, 12)))) {
              val today = Fake(listOf(st), tools = listOf(withMake), makeImage = made)
 diff --git a/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosScriptTest.kt b/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosScriptTest.kt
-index 9d0a974..da3bb8d 100644
+index 9d0a974..4f37d3e 100644
 --- a/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosScriptTest.kt
 +++ b/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosScriptTest.kt
-@@ -665,18 +665,18 @@ class OneiosScriptTest {
+@@ -585,7 +585,7 @@ class OneiosScriptTest {
+         val kc2 = ByteArray(6000) { (it % 239).toByte() }
+         val addon1 = gpuMode(f, "placed", 1)
+         makeKernelOut(f, kc2, xnuShaOf(f), kcInShaOf(f))
+-        val o = f.verb(OneiosRoot.Verb.FINISH, listOf("kernel", Hashes.sha256(kc2), bid))
++        val o = f.verb(OneiosRoot.Verb.FINISH, listOf("kernel", Hashes.sha256(kc2), bid), env = a56PropertiesEnv(f))
+         assertOk(o)
+         val asha = Hashes.sha256(addon1)
+         val tsha = Hashes.sha256(File(f.file("a56gpu/trust").path).readBytes())
+@@ -650,7 +650,7 @@ class OneiosScriptTest {
+             val kc = ByteArray(6000 + i) { (it % 229).toByte() }
+             gpuMode(f, mode, 3)
+             makeKernelOut(f, kc, xnuShaOf(f), kcInShaOf(f))
+-            val o = f.verb(OneiosRoot.Verb.FINISH, listOf("kernel", Hashes.sha256(kc), bid))
++            val o = f.verb(OneiosRoot.Verb.FINISH, listOf("kernel", Hashes.sha256(kc), bid), env = a56PropertiesEnv(f))
+             assertOk(o)
+             assertEquals(mode, listOf(said[mode]), o.reply.results)
+             assertEquals(mode, Hashes.sha256(kc), Hashes.sha256(File(f.stage, "image/kernel.kc").readBytes()))
+@@ -665,22 +665,23 @@ class OneiosScriptTest {
          assertSetHolds(f)
      }
  
@@ -765,7 +783,8 @@ index 9d0a974..da3bb8d 100644
          val kc = ByteArray(6000) { (it % 227).toByte() }
          gpuMode(f, "placed", 4)
          makeKernelOut(f, kc, xnuShaOf(f), kcInShaOf(f))
-         val o = f.verb(OneiosRoot.Verb.FINISH, listOf("kernel", Hashes.sha256(kc), bid))
+-        val o = f.verb(OneiosRoot.Verb.FINISH, listOf("kernel", Hashes.sha256(kc), bid))
++        val o = f.verb(OneiosRoot.Verb.FINISH, listOf("kernel", Hashes.sha256(kc), bid), env = a56PropertiesEnv(f))
          assertOk(o)
 -        assertEquals(o.text, emptyList<String>(), o.reply.results)
 -        assertTrue(o.text, o.text.lines().none { it.contains("a56") || it.contains("A56") })
@@ -773,9 +792,28 @@ index 9d0a974..da3bb8d 100644
          assertFalse(f.file("a56gpu/calls").exists())
          assertFalse(File(f.stage, "image/kernel.kc.gpuaddon").exists())
          assertTrue(before.contentEquals(File(f.stage, "image/overlay/userland/owner-trust.json").readBytes()))
-@@ -1102,6 +1102,7 @@ class OneiosScriptTest {
+-        assertFalse(File(f.stage, "logs").listFiles()!!.single().readText().contains("a56 gpu"))
++        val receipt = File(f.stage, "logs").listFiles()!!.single().readText()
++        assertTrue(receipt, receipt.contains("a56 gpu: none: the A56 GPU addon is only enabled on the Galaxy A56; this host's GPU path is unchanged"))
+         assertSetHolds(f)
+         assertOk(f.verb(OneiosRoot.Verb.RESTORE, listOf("kernel")))
+         assertSetHolds(f)
+@@ -1101,7 +1102,20 @@ class OneiosScriptTest {
+      * kernel.kc.gpuaddon as `oneios-tool phone addon` stages one, the pairing inputs and a kernelcache. Returns the
       * set's kernel.kc and the runtime's kernel build id.
       */
++    private fun a56PropertiesEnv(f: Fake): Map<String, String> {
++        val bin = f.file("a56-test-bin").apply { mkdirs() }
++        val getprop = File(bin, "getprop")
++        getprop.writeText(
++            "#!/bin/sh\n" +
++                "[ \"\$#\" -eq 1 ] || exit 0\n" +
++                "awk -F= -v wanted=\"\$1\" '\$1 == wanted { print substr(\$0, index(\$0, \"=\") + 1); found = 1; exit } END { if (!found) exit 1 }' \"\$ONEIOS_TEST_ROOT/props\" 2>/dev/null\n",
++        )
++        assertTrue(getprop.setExecutable(true))
++        return mapOf("PATH" to HostTools.path(bin.path))
++    }
++
      private fun a56Stage(f: Fake, build: String, addon: ByteArray? = null): Pair<ByteArray, String> {
 +        f.file("props").writeText("ro.product.model=SM-A566B\nro.product.device=a56x\nro.soc.model=s5e8855\n")
          val bid = "xnu-12377.121.6-ios-27.0.1-24A446-abcdef012345"
@@ -871,3 +909,4 @@ index a39fb5c..5fc4ada 100644
  
  # Root tools: the root manager's own busybox and resetprop, as oneos_switch.sh.
  BB=""
+
