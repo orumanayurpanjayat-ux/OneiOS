@@ -705,9 +705,14 @@ pub fn main() -> i32 {
     s.fb = fb;
     let s24_profile = config.host.is_some_and(|host| host.0.name == "galaxy-s24-ultra");
     if s24_profile && !config.given("boot-args") {
+        let extra_boot_args = if config.given("boot-args-add") {
+            config.boot_args_add.clone()
+        } else {
+            String::new()
+        };
         if config::s24_display_boot_args(
             &mut config.boot_args,
-            if config.given("boot-args-add") { &config.boot_args_add } else { "" },
+            &extra_boot_args,
             config::BOOT_ARGS_SIZE,
             config.scale,
             s.fb.2,
