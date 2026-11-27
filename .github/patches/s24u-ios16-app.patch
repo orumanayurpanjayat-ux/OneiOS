@@ -746,7 +746,7 @@ index 652d76d..b3ad2b5 100644
          for (st in listOf(withKernel, withKernel.copy(kb = OneiosStatus.Kb(kb.kernelcacheSha256, 12)))) {
              val today = Fake(listOf(st), tools = listOf(withMake), makeImage = made)
 diff --git a/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosScriptTest.kt b/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosScriptTest.kt
-index 9d0a974..4f37d3e 100644
+index 9d0a974..e8983fa 100644
 --- a/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosScriptTest.kt
 +++ b/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosScriptTest.kt
 @@ -585,7 +585,7 @@ class OneiosScriptTest {
@@ -758,6 +758,15 @@ index 9d0a974..4f37d3e 100644
          assertOk(o)
          val asha = Hashes.sha256(addon1)
          val tsha = Hashes.sha256(File(f.file("a56gpu/trust").path).readBytes())
+@@ -617,7 +617,7 @@ class OneiosScriptTest {
+         val kc3 = ByteArray(6100) { (it % 233).toByte() }
+         val addon2 = gpuMode(f, "placed", 2)
+         makeKernelOut(f, kc3, xnuShaOf(f), kcInShaOf(f))
+-        val o2 = f.verb(OneiosRoot.Verb.FINISH, listOf("kernel", Hashes.sha256(kc3), bid))
++        val o2 = f.verb(OneiosRoot.Verb.FINISH, listOf("kernel", Hashes.sha256(kc3), bid), env = a56PropertiesEnv(f))
+         assertOk(o2)
+         assertTrue(o2.text, o2.reply.results.single().startsWith("a56-gpu placed kernel.kc.gpuaddon ${Hashes.sha256(addon2)} "))
+         assertEquals(Hashes.sha256(addon2), Hashes.sha256(File(f.stage, "image/kernel.kc.gpuaddon").readBytes()))
 @@ -650,7 +650,7 @@ class OneiosScriptTest {
              val kc = ByteArray(6000 + i) { (it % 229).toByte() }
              gpuMode(f, mode, 3)
