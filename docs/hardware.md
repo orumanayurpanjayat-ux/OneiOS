@@ -4508,7 +4508,7 @@ bad name, a missing file, the environment's defaults taken and kept, the ctl too
 every entry forced); the stand-in phone (`tools/oneios-tool/tests/phone/hw-backend.sh`: `brightctl` on an S26 Ultra's
 panel, 1..2300 of 12750 detected, 1..12750 with `none` or the S24's properties, a set `ONEIOS_BRIGHT_MAX` kept; `run.sh`:
 `phone status`'s host line for each phone). 2026-11-23, on the build laptop: every S24 Ultra model number above (SM-S928B, U, U1, W, N, 0; the W with its US vendor model and bootloader) in `test_hw_backend.c` (the C, on main), `host.rs`, `test-verify-host.sh` and `run.sh`; the same day in the Rust (`cargo test -p onebridges host_device`, `test_hw_backend.rs`): those models, the stock SM-S928W, and the S26 Ultra by its codename `m3q` and by its platform `canoe` alone; `cpu::test_cpu::cpu` has the S26 Ultra's SM8850 topology (the C's `test_bridges.c` `test_cpu`). **Not run on a phone**: the first phone start shows the line above; on the
-S24 Ultra it must say `galaxy-s24-ultra ... defaults: none (today's)`.
+S24 Ultra it should say `galaxy-s24-ultra ... defaults: gpu=auto, panel-fallback=1440x3120@120, width=1440, height=3120, scale=3, hz=120`. These defaults request the native guest frame and 120 Hz target; actual sustained refresh and GPU acceleration still need confirmation on the phone.
 
 ## 7i. Sensors: motion and the front light, from the sensor hub (fix/sensors-als, 2026-11-25; on by default since the merge into main, `sensors=off` turns it off; not booted)
 

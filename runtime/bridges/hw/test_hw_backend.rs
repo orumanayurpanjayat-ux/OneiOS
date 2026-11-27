@@ -46,7 +46,7 @@ fn host_device() {
     // The table: the home device first; names unique; every entry matches by a model; its xnuhost settings are only the
     // keys the config merges as device defaults (gpu, panel-fallback, hz, width, height, scale, return-graceful-ms, astc,
     // hw-backend*), its environment ones only
-    // variables a bridge reads. The S24 Ultra's entry holds nothing: its behaviour is today's.
+    // variables a bridge reads. The S24 entry carries the native frame/GPU profile and no bridge environment defaults.
     let t = host_table();
     assert!(t.len() == 5 && t[0].name == "galaxy-s24-ultra");
     for (i, e) in t.iter().enumerate() {
@@ -70,7 +70,18 @@ fn host_device() {
             );
         }
     }
-    assert!(t[0].config.is_empty() && t[0].env.is_empty());
+    assert_eq!(
+        t[0].config,
+        &[
+            "gpu=auto",
+            "panel-fallback=1440x3120@120",
+            "width=1440",
+            "height=3120",
+            "scale=3",
+            "hz=120"
+        ]
+    );
+    assert!(t[0].env.is_empty());
     assert!(std::ptr::eq(host_find("GALAXY-A56").unwrap(), &t[4]) && host_find("pixel").is_none());
     assert_eq!(host_names(), "galaxy-s24-ultra, galaxy-s25-ultra, galaxy-s25, galaxy-s26-ultra, galaxy-a56");
 
@@ -191,7 +202,10 @@ fn host_device() {
     env::set_var("ONEIOS_HOST_PROPS", phone(&tmp, "s24u", "SM-S928B", "e3q", "pineapple", "SM8650", "QTI"));
     let (e, line) = host_tool(&mut hw).unwrap();
     assert!(e == Some(&t[0]) && line.contains("host: galaxy-s24-ultra, matched by ro.product.model=SM-S928B;"));
-    assert!(line.contains("; defaults: none (today's)") && env::var("ONEIOS_BRIGHT_MAX").is_err());
+    assert!(
+        line.contains("; defaults: gpu=auto, panel-fallback=1440x3120@120, width=1440, height=3120, scale=3, hz=120")
+            && env::var("ONEIOS_BRIGHT_MAX").is_err()
+    );
     env::set_var("ONEIOS_HOST_PROPS", phone(&tmp, "pixel", "Pixel 11 Pro", "frankel", "zuma", "Tensor G5", "Google"));
     let (e, line) = host_tool(&mut hw).unwrap();
     assert!(

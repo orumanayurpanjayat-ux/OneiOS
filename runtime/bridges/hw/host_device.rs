@@ -77,7 +77,7 @@ const NONE: &[&str] = &[];
 //   - an entry holds only settings that already exist as options: an xnuhost setting that the config merges as a device
 //     default (gpu, panel-fallback, hz, width/height/scale (one frame), return-graceful-ms, astc, hw-backend*), or an
 //     environment variable a bridge reads;
-//   - the home device (the S24 Ultra) has none: its behaviour is today's, byte for byte;
+//   - the home device (the S24 Ultra) has only its display/GPU defaults here; no bridge environment overrides are assumed;
 //   - takeover: true allows session-mode=takeover there (the opt-in Android takeover, docs/booter.md 2.9d): only on a
 //     phone where that mode ran (the S26 Ultra, YMGPwcca's experiment) or that is the owner's (the S24 Ultra);
 //   - a value the docs mark unverified on that phone is not set (today's default is the conservative one) and is said
@@ -95,7 +95,8 @@ static TABLE: [HostDevice; 5] = [
     // ro.product.vendor.model=SM-S928U [F per the OneOS fork's public issue 128]): nothing here reads either, so it is
     // matched by its own ro.product.model. e3q and SM8650 on the U, U1, W, N and 0 [I] (one hardware family; only the B
     // has booted iOS). The Japanese ones (SC-52E, SCG26) are not SM-S928 and their codename is [U]: they
-    // get this entry by their SoC (SM8650, the SoC's entry), which has no defaults either.
+    // get the S24 profile by their SoC (SM8650); the same display/GPU defaults apply, while their panel controls remain
+    // unverified.
     // takeover: session-mode=takeover is allowed (the owner's phone, 2026-11-23: the opt-in Android takeover, ported from
     // YMGPwcca/OneOS's S26 experiment; docs/booter.md 2.9d). Not run on the phone yet.
     HostDevice {
