@@ -57,6 +57,99 @@ pub fn runtime_addon(runtime: &str) -> Option<Addon> {
     Some(Addon { blob, cdhashes })
 }
 
+/// Whether a GPU add-on contains the publishing marker and iPhone X 20F66 NativeAdrenoMetal bundle. Generic 20F66
+/// images keep `oneios-gpu-metal=0` for the A56; xnuhost may enable it on an S24 only when this exact plug-in is
+/// available to the guest. This reads just the small target and marker records, never decompresses the executable.
+pub fn native_adreno_metal_20f66(blob: &[u8]) -> Result<(), String> {
+    let cut = || "the gpuaddon is cut short".to_owned();
+    if blob.len() < 24 || blob.get(..8) != Some(b"NGPUADD2".as_slice()) {
+        return Err("the gpuaddon is not NGPUADD2".into());
+    }
+    if le::try_u64(blob, 16) != Some(blob.len() as u64) {
+        return Err("the gpuaddon total does not match its length".into());
+    }
+    let count = le::try_u32(blob, 8).ok_or_else(cut)? as usize;
+    if count > (blob.len() - 24) / 24 {
+        return Err(cut());
+    }
+
+    const EXECUTABLE: &[u8] = b"addons/NativeAdrenoMetal.bundle/NativeAdrenoMetal";
+    const TARGET: &[u8] = b"addons/NativeAdrenoMetal.bundle/oneios-target";
+    const PUBLISH: &[u8] = b"addons/NativeAdrenoMetal.publish";
+    let mut at = 24usize;
+    let mut executable = false;
+    let mut target: Option<String> = None;
+    let mut publish = false;
+    for _ in 0..count {
+        let nlen = le::try_u32(blob, at).ok_or_else(cut)? as usize;
+        let size = le::try_u64(blob, at + 8).ok_or_else(cut)?;
+        let packed_len = usize::try_from(le::try_u64(blob, at + 16).ok_or_else(cut)?).map_err(|_| cut())?;
+        at = at.checked_add(24).ok_or_else(cut)?;
+        if nlen == 0 {
+            return Err(cut());
+        }
+        let name_end = at.checked_add(nlen).ok_or_else(cut)?;
+        let name_record = blob.get(at..name_end).ok_or_else(cut)?;
+        if name_record.last() != Some(&0) {
+            return Err("the gpuaddon has a path without its terminating NUL".into());
+        }
+        let name = &name_record[..nlen - 1];
+        let padded_name_len = nlen.checked_add(7).ok_or_else(cut)? & !7;
+        at = at.checked_add(padded_name_len).ok_or_else(cut)?;
+        let packed_end = at.checked_add(packed_len).ok_or_else(cut)?;
+        let packed = blob.get(at..packed_end).ok_or_else(cut)?;
+        let padded_packed_len = packed_len.checked_add(7).ok_or_else(cut)? & !7;
+        at = at.checked_add(padded_packed_len).ok_or_else(cut)?;
+        if at > blob.len() {
+            return Err(cut());
+        }
+
+        if name == EXECUTABLE {
+            executable = size != 0;
+        } else if name == TARGET {
+            if target.is_some() {
+                return Err("the gpuaddon contains duplicate NativeAdrenoMetal target records".into());
+            }
+            let bytes = xh_core::inflate::zlib(packed, 256)
+                .ok()
+                .filter(|bytes| bytes.len() as u64 == size)
+                .ok_or_else(|| "the NativeAdrenoMetal oneios-target does not unpack".to_owned())?;
+            target = Some(
+                std::str::from_utf8(&bytes)
+                    .map_err(|_| "the NativeAdrenoMetal oneios-target is not UTF-8".to_owned())?
+                    .trim()
+                    .to_owned(),
+            );
+        } else if name == PUBLISH {
+            if publish {
+                return Err("the gpuaddon contains duplicate NativeAdrenoMetal publish markers".into());
+            }
+            let bytes = xh_core::inflate::zlib(packed, 16)
+                .ok()
+                .filter(|bytes| bytes.len() as u64 == size)
+                .ok_or_else(|| "the NativeAdrenoMetal publish marker does not unpack".to_owned())?;
+            if bytes.as_slice() != b"1\n" {
+                return Err("the NativeAdrenoMetal publish marker is not enabled".into());
+            }
+            publish = true;
+        }
+    }
+    if at != blob.len() {
+        return Err("the gpuaddon entries do not fill the declared length".into());
+    }
+    if !executable {
+        return Err("the gpuaddon has no NativeAdrenoMetal executable".into());
+    }
+    if !publish {
+        return Err("the gpuaddon has no enabled NativeAdrenoMetal publish marker".into());
+    }
+    match target.as_deref() {
+        None => Err("the gpuaddon has no NativeAdrenoMetal oneios-target".into()),
+        Some("iPhone10,3 20F66") => Ok(()),
+        Some(other) => Err(format!("the NativeAdrenoMetal plug-in targets {other:?}, not iPhone10,3 20F66")),
+    }
+}
+
 /// `ios addon`'s CDHash list (and `phone addon`'s reader of it): one 40-hex-digit CDHash per line, then the file's
 /// name; blank lines and `#` comments are skipped.
 fn parse_cdhashes(text: &[u8]) -> Result<Vec<[u8; 20]>, String> {

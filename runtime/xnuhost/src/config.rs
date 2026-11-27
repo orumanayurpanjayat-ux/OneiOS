@@ -1995,6 +1995,30 @@ pub fn ios16_boot_args(args: &mut String, size: usize) -> Result<String, NoRoom>
     Ok(added.join(" "))
 }
 
+/// Make the 20F66 guest publish the S24 Ultra's Adreno Metal accelerator. The image's generic iOS 16.5
+/// configuration disables the Adreno accelerator for the A56; on the S24 the host renderer is KGSL and the
+/// iPhone X-targeted NativeAdrenoMetal bundle speaks its virtio-GPU user client. An explicit runtime `boot-args`
+/// setting is left to the caller. Returns whether this changed or added the boot argument.
+pub fn ios16_enable_adreno_metal(args: &mut String, size: usize) -> Result<bool, NoRoom> {
+    let key = "oneios-gpu-metal";
+    let found = args.match_indices(key).find(|(at, name)| {
+        let before_ok = *at == 0 || args.as_bytes()[at - 1].is_ascii_whitespace();
+        let after = args.as_bytes().get(*at + name.len());
+        before_ok && after.map_or(true, |c| *c == b'=' || c.is_ascii_whitespace())
+    });
+    if let Some((start, name)) = found {
+        let tail = &args[start + name.len()..];
+        let end = tail.find(char::is_whitespace).map_or(args.len(), |n| start + name.len() + n);
+        if &args[start..end] == "oneios-gpu-metal=1" {
+            return Ok(false);
+        }
+        args.replace_range(start..end, "oneios-gpu-metal=1");
+        return Ok(true);
+    }
+    append_arg(args, size, "oneios-gpu-metal=1")?;
+    Ok(true)
+}
+
 /// Whether `args` has a boot argument named `name`: a word equal to it, or one that starts with it and then '='.
 fn boot_arg_named(args: &str, name: &str) -> bool {
     words(args).any(|w| w.strip_prefix(name).is_some_and(|rest| rest.is_empty() || rest.starts_with('=')))

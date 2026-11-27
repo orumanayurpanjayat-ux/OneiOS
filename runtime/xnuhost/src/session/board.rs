@@ -856,6 +856,29 @@ impl Session {
                 .map(|blob| crate::addon::Addon { blob, cdhashes: Vec::new() })
                 .or_else(|| crate::addon::runtime_addon(&config.runtime)),
         };
+        // Generic 20F66 images disable NativeAdreno for the A56. Enable it on the S24 only after the KGSL renderer
+        // is live and the selected addon carries the iPhone X 20F66 bundle plus its publish marker; otherwise stock
+        // iOS 16.5 Metal may probe an accelerator with no matching driver. A complete runtime boot-args line remains
+        // the owner's override.
+        if self.image_set.as_ref().is_some_and(|s| s.build == "20F66")
+            && config.host.is_some_and(|host| host.0.name == "galaxy-s24-ultra")
+            && kgsl
+            && gpu.is_some()
+            && !config.given("boot-args")
+        {
+            match addon.as_ref().map(|a| crate::addon::native_adreno_metal_20f66(&a.blob)) {
+                Some(Ok(())) => match config::ios16_enable_adreno_metal(&mut config.boot_args, config::BOOT_ARGS_SIZE) {
+                    Ok(true) => logi!("ios16: S24 Ultra: enabled the iPhone X 20F66 Adreno Metal accelerator"),
+                    Ok(false) => logi!("ios16: S24 Ultra: the iPhone X 20F66 Adreno Metal accelerator is already enabled"),
+                    Err(_) => {
+                        loge!("ios16: S24 Ultra: no room to enable the Adreno Metal accelerator");
+                        return Err(BootFailed);
+                    }
+                },
+                Some(Err(why)) => logi!("ios16: S24 Ultra: kept oneios-gpu-metal=0; {why}"),
+                None => logi!("ios16: S24 Ultra: kept oneios-gpu-metal=0; no GPU addon is loaded"),
+            }
+        }
         let policies = sidecar(&config.kernel, "vroot", 128 << 20);
         // Apple's trust caches of the set (IM4P) and the owner module, as the sidecar the kernel takes, unless one is
         // shipped.

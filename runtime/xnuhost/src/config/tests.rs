@@ -1723,6 +1723,24 @@ fn ios16_boot_args_are_roottweaks_20f66_words() {
 }
 
 #[test]
+fn ios16_s24_enables_adreno_metal_without_duplicating_the_switch() {
+    let mut args = "debug=0x14e oneios-gpu-metal=0 vgpu-3d=1".to_owned();
+    assert!(ios16_enable_adreno_metal(&mut args, BOOT_ARGS_SIZE).unwrap());
+    assert_eq!(args, "debug=0x14e oneios-gpu-metal=1 vgpu-3d=1");
+    assert!(!ios16_enable_adreno_metal(&mut args, BOOT_ARGS_SIZE).unwrap());
+    assert_eq!(args.matches("oneios-gpu-metal=").count(), 1);
+
+    let mut no_switch = "debug=0x14e vgpu-3d=1".to_owned();
+    assert!(ios16_enable_adreno_metal(&mut no_switch, BOOT_ARGS_SIZE).unwrap());
+    assert!(no_switch.ends_with(" oneios-gpu-metal=1"));
+
+    let mut short = "vgpu-3d=1".to_owned();
+    let short_size = short.len() + 1;
+    assert!(ios16_enable_adreno_metal(&mut short, short_size).is_err());
+    assert_eq!(short, "vgpu-3d=1");
+}
+
+#[test]
 fn ios16_fixups_only_for_20f66_once_and_switchable() {
     // the image's own (roottweak's keybagd and QuartzCore entries) stay first; CoreImage's GL fallback after them
     let mut list = TextFixups::default();
