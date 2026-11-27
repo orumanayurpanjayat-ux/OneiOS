@@ -117,7 +117,7 @@ jobs:
                 .head_repository.full_name == $repo
               ' <<< "$run" >/dev/null || { echo "::error::run $metal_run_id is not a successful manual metal-plugin run from this repository's main branch"; exit 1; }
             fi
-            artifact=$(gh api "repos/$REPO/actions/runs/$metal_run_id/artifacts" --jq --arg artifact "$metal_artifact" '[.artifacts[] | select(.name == $artifact and .expired == false)] | if length == 1 then .[0] else empty end')
+            artifact=$(gh api "repos/$REPO/actions/runs/$metal_run_id/artifacts" | jq --arg artifact "$metal_artifact" '[.artifacts[] | select(.name == $artifact and .expired == false)] | if length == 1 then .[0] else empty end')
             [ -n "$artifact" ] || { echo "::error::run $metal_run_id has no unique live $metal_artifact artifact"; exit 1; }
             if [ "$metal_target" = 'iPhone10,3 20F66' ]; then
               [ "$(jq -r .id <<< "$artifact")" = 15222288592 ] &&
