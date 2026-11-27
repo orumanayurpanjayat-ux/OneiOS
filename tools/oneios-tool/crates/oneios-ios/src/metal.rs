@@ -141,6 +141,94 @@ pub fn stage_edit(root: &Path, hooks: &Path, jobs: &str, knows: bool, rt: bool) 
     }
     edit(root, "scripts/build-adreno-metal-plugin.py", &plugin_pairs)?;
 
+    // The 20F66 guest is arm64 iOS 16.5. The pinned base only knows iOS 17 and iOS 27, so extend those build
+    // scripts in the staged copy rather than changing the upstream checkout or letting an iOS 17 binary slip through.
+    if s(&hooks, "target")? == "iPhone10,3 20F66" {
+        edit(
+            root,
+            "scripts/build-turnip-darwin.py",
+            &[
+                (
+                    "parser.add_argument('--target', choices=('host', 'ios', 'ios27'), default='host')",
+                    "parser.add_argument('--target', choices=('host', 'ios', 'ios16', 'ios27'), default='host')".into(),
+                    "iOS 16.5 Turnip target",
+                ),
+                (
+                    "OUT = ROOT / {'host': 'build/mesa-tu', 'ios': 'build/mesa-tu-ios', 'ios27': 'build/mesa-tu-ios27'}[args.target]",
+                    "OUT = ROOT / {'host': 'build/mesa-tu', 'ios': 'build/mesa-tu-ios', 'ios16': 'build/mesa-tu-ios16', 'ios27': 'build/mesa-tu-ios27'}[args.target]".into(),
+                    "separate iOS 16.5 Turnip output",
+                ),
+                (
+                    "if args.target in ('ios', 'ios27'):",
+                    "if args.target in ('ios', 'ios16', 'ios27'):".into(),
+                    "route iOS 16.5 through the iOS cross build",
+                ),
+                (
+                    "triple = 'arm64e-apple-ios27.0' if args.target == 'ios27' else 'arm64-apple-ios17.0'",
+                    "triple = 'arm64e-apple-ios27.0' if args.target == 'ios27' else 'arm64-apple-ios16.5' if args.target == 'ios16' else 'arm64-apple-ios17.0'".into(),
+                    "iOS 16.5 ARM64 deployment target",
+                ),
+            ],
+        )?;
+        edit(
+            root,
+            "scripts/build-adreno-metal-bridge.py",
+            &[
+                (
+                    "parser.add_argument('--target', choices=['ios', 'ios27', 'host'], default='ios')",
+                    "parser.add_argument('--target', choices=['ios', 'ios16', 'ios27', 'host'], default='ios')".into(),
+                    "iOS 16.5 bridge target",
+                ),
+                (
+                    "triple = {'ios': 'aarch64-apple-ios', 'ios27': 'arm64e-apple-ios', 'host': 'aarch64-apple-darwin'}[args.target]",
+                    "triple = {'ios': 'aarch64-apple-ios', 'ios16': 'aarch64-apple-ios', 'ios27': 'arm64e-apple-ios', 'host': 'aarch64-apple-darwin'}[args.target]".into(),
+                    "ARM64 Rust bridge target",
+                ),
+                (
+                    "IPHONEOS_DEPLOYMENT_TARGET='27.0' if args.target == 'ios27' else '17.0'",
+                    "IPHONEOS_DEPLOYMENT_TARGET='27.0' if args.target == 'ios27' else '16.5' if args.target == 'ios16' else '17.0'".into(),
+                    "iOS 16.5 Rust bridge deployment target",
+                ),
+            ],
+        )?;
+        edit(
+            root,
+            "scripts/build-adreno-metal-plugin.py",
+            &[
+                (
+                    "IOS27 = sys.argv[1:] == ['--target', 'ios27']\nOUT = ROOT / ('build/adreno-metal-plugin27' if IOS27 else 'build/adreno-metal-plugin')",
+                    "IOS27 = sys.argv[1:] == ['--target', 'ios27']\nIOS16 = sys.argv[1:] == ['--target', 'ios16']\nOUT = ROOT / ('build/adreno-metal-plugin27' if IOS27 else 'build/adreno-metal-plugin16' if IOS16 else 'build/adreno-metal-plugin')".into(),
+                    "separate iOS 16.5 plug-in output",
+                ),
+                (
+                    "'-target', 'arm64e-apple-ios27.0' if IOS27 else 'arm64-apple-ios17.0'",
+                    "'-target', 'arm64e-apple-ios27.0' if IOS27 else 'arm64-apple-ios16.5' if IOS16 else 'arm64-apple-ios17.0'".into(),
+                    "iOS 16.5 ARM64 plug-in target",
+                ),
+                (
+                    "('build/mesa-tu-ios27' if IOS27 else 'build/mesa-tu-ios')",
+                    "('build/mesa-tu-ios27' if IOS27 else 'build/mesa-tu-ios16' if IOS16 else 'build/mesa-tu-ios')".into(),
+                    "link iOS 16.5 Turnip",
+                ),
+                (
+                    "BRIDGE_TARGET = 'ios27' if IOS27 else 'ios'",
+                    "BRIDGE_TARGET = 'ios27' if IOS27 else 'ios16' if IOS16 else 'ios'".into(),
+                    "use the iOS 16.5 bridge target",
+                ),
+                (
+                    "MinimumOSVersion='27.0' if IOS27 else '17.0'",
+                    "MinimumOSVersion='27.0' if IOS27 else '16.5' if IOS16 else '17.0'".into(),
+                    "iOS 16.5 bundle minimum OS",
+                ),
+                (
+                    "assert (magic, cputype, subtype & 0xffffff) == (0xfeedfacf, 0x100000c, 2 if IOS27 else 0), 'expected an arm64e (27) or ARM64 (17) Mach-O'",
+                    "assert (magic, cputype, subtype & 0xffffff) == (0xfeedfacf, 0x100000c, 2 if IOS27 else 0), 'expected an arm64e (27) or ARM64 Mach-O'".into(),
+                    "verify the iOS 16.5 bundle is ARM64",
+                ),
+            ],
+        )?;
+    }
+
     // The frontend at b0d6a07 has the caller-by-framework answer of supportsFamily: for RenderBox and WebGPU; the
     // base's plug-in script inserts its own, newer one (ANGLE too) before installAnswers and the two collide. The
     // frontend's goes, the script's is inserted.
@@ -156,6 +244,38 @@ pub fn stage_edit(root: &Path, hooks: &Path, jobs: &str, knows: bool, rt: bool) 
     edit(root, "drivers/AdrenoMetal/NativeBridgeMetalFrontend.mm", &frontend_camera_edits())?;
     edit(root, "drivers/AdrenoMetal/NativeAdrenoMetalPlugin.mm", &pool_row_edits())?;
 
+    let private_display_hooks = hooks.get("private_display_hooks").and_then(|v| v.as_bool()).unwrap_or(true);
+    if !private_display_hooks {
+        let target = s(&hooks, "target")?;
+        if target != "iPhone10,3 20F66" {
+            bail!("private display hooks may only be disabled for the known iPhone X 20F66 guest, not {target}");
+        }
+        // The plug-in's built-in display diagnostic/write code is tied to other QuartzCore caches. Until 20F66's
+        // offsets have been derived, remove that entire block and keep its call site as a no-op. Generic Metal,
+        // bridge, Turnip, and the address-free OneiOS frontend helpers remain enabled.
+        let plugin = root.join("drivers/AdrenoMetal/NativeAdrenoMetalPlugin.mm");
+        let text = std::fs::read_to_string(&plugin).with_context(|| plugin.display().to_string())?;
+        let begin = "// Reads of the render server's own state for the framebuffer-format question";
+        let boot_arg = "static bool bootArgSet(const char *key) {";
+        let end = "// Every process other than the render server:";
+        if text.matches(begin).count() != 1 || text.matches(boot_arg).count() != 1 || text.matches(end).count() != 1 ||
+            text.find(begin) >= text.find(boot_arg) || text.find(boot_arg) >= text.find(end) {
+            bail!("NativeAdrenoMetalPlugin.mm: the private display diagnostic block is not where it was");
+        }
+        let b = text.find(begin).unwrap_or(0);
+        let boot = text.find(boot_arg).unwrap_or(0);
+        let without_helpers = format!("{}{}", &text[..b], &text[boot..]);
+        let private_begin = "static unsigned patchFramebufferBranch(uintptr_t slide) {";
+        if without_helpers.matches(private_begin).count() != 1 || without_helpers.matches(end).count() != 1 ||
+            without_helpers.find(private_begin) >= without_helpers.find(end) {
+            bail!("NativeAdrenoMetalPlugin.mm: the cache-addressed display block is not where it was");
+        }
+        let private_b = without_helpers.find(private_begin).unwrap_or(0);
+        let private_e = without_helpers.find(end).unwrap_or(0);
+        let safe = "static void reportDisplayState(Gpu &gpu) { (void)gpu; }\n";
+        std::fs::write(&plugin, format!("{}{}{}", &without_helpers[..private_b], safe, &without_helpers[private_e..]))?;
+        println!("metal: staged NativeAdrenoMetalPlugin.mm: removed display reads/writes using offsets from other iOS builds");
+    } else {
     // The plug-in's shared cache addresses: upstream's are the iPad17,3 24A446 cache's.
     let plugin = root.join("drivers/AdrenoMetal/NativeAdrenoMetalPlugin.mm");
     let text = std::fs::read_to_string(&plugin).with_context(|| plugin.display().to_string())?;
@@ -214,6 +334,7 @@ pub fn stage_edit(root: &Path, hooks: &Path, jobs: &str, knows: bool, rt: bool) 
         defines.matches("#define").count()
     );
     std::fs::write(&plugin, text)?;
+    }
     Ok(())
 }
 

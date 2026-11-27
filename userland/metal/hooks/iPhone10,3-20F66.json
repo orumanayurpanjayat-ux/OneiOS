@@ -1,0 +1,5 @@
+{
+  "target": "iPhone10,3 20F66",
+  "source": "Apple iOS 16.5 (20F66) iPhone X guest base; no private QuartzCore addresses are enabled",
+  "private_display_hooks": false
+}

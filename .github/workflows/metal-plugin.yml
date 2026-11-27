@@ -1,7 +1,6 @@
-# Build the Metal plug-in (NativeAdrenoMetal.bundle) and capture plug-in on a macOS runner: Xcode's iPhoneOS SDK, the pins'
-# public sources, this tree's patches — no Apple image, no shared cache (the link uses the SDK's .tbd
-# stubs; the plug-in's shared-cache addresses come from userland/metal/hooks/<product>-<build>.json, which
-# is committed). This is reusable by the runtime workflow; it can also be run manually for a stageable artifact.
+# Build the Metal plug-in (NativeAdrenoMetal.bundle) on a macOS runner. The iPhone X 20F66 target derives ARM64 linker
+# stubs from its pinned SystemOS shared cache; other targets use Xcode SDK stubs and their committed hook maps. Apple
+# inputs stay in the job and are never uploaded. This is reusable by the runtime workflow and can also be run manually.
 #
 #   Actions -> metal-plugin -> Run workflow, target "iPhone18,2 24A446"
 #
@@ -17,12 +16,23 @@ on:
         required: false
         type: string
         default: 'iPhone18,2 24A446'
+      artifact_name:
+        description: 'The uploaded artifact name'
+        required: false
+        type: string
+        default: 'NativeAdrenoMetal'
   workflow_dispatch:
     inputs:
       target:
         description: 'The guest to build for: "<product> <build>" (userland/metal/hooks/<product>-<build>.json)'
         required: true
+        type: string
         default: 'iPhone18,2 24A446'
+      artifact_name:
+        description: 'The uploaded artifact name'
+        required: false
+        type: string
+        default: 'NativeAdrenoMetal'
 permissions:
   contents: read
 jobs:
@@ -53,9 +63,21 @@ jobs:
           fi
           hooks="userland/metal/hooks/$target_slug.json"
           [ -s "$hooks" ] || { echo "::error::No checked-in shared-cache hooks for $ONEIOS_METAL_TARGET ($hooks)"; exit 1; }
+          case "$ONEIOS_METAL_TARGET" in
+            'iPhone10,3 20F66')
+              echo 'IOS_TBD=out/ios16-tbd' >> "$GITHUB_ENV"
+              echo 'IOS_MIN=16.5' >> "$GITHUB_ENV"
+              echo 'IOS_TARGET=arm64-apple-ios16.5' >> "$GITHUB_ENV"
+              ;;
+            'iPhone18,2 24A446'|'iPhone18,2 24B156')
+              ;;
+            *) echo "::error::Unsupported Metal build target: $ONEIOS_METAL_TARGET"; exit 1 ;;
+          esac
           echo "Using target $ONEIOS_METAL_TARGET with $hooks"
       - name: Xcode with the iPhoneOS SDK
         timeout-minutes: 5
+        env:
+          ONEIOS_METAL_TARGET: ${{ inputs.target }}
         run: |
           set -euo pipefail
           # The newest Xcode the runner has; the build only needs its clang, ld and iPhoneOS SDK.
@@ -64,15 +86,21 @@ jobs:
           xcodebuild -version
           sdk=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "iPhoneOS SDK: $sdk"
-          # The plug-in's deployment target: 27.0 when the SDK is 27 or newer, else the SDK's own.
-          ver=$(sed -n 's/.*"Version" *: *"\([0-9.]*\)".*/\1/p' "$sdk/SDKSettings.json" | head -1)
-          case "$ver" in
-            2[7-9]*|[3-9][0-9]*) min=27.0 ;;
-            *) min=${ver%.*} ; [ -n "$min" ] || min=26.0 ;;
-          esac
-          echo "SDK $ver, the plug-in's deployment target $min"
+          if [ "$ONEIOS_METAL_TARGET" = 'iPhone10,3 20F66' ]; then
+            min=16.5
+            target=arm64-apple-ios16.5
+          else
+            # The iOS 27 builds use arm64e; an iOS 16.5 bundle is built separately as plain arm64.
+            ver=$(sed -n 's/.*"Version" *: *"\([0-9.]*\)".*/\1/p' "$sdk/SDKSettings.json" | head -1)
+            case "$ver" in
+              2[7-9]*|[3-9][0-9]*) min=27.0 ;;
+              *) min=${ver%.*} ; [ -n "$min" ] || min=26.0 ;;
+            esac
+            target=arm64e-apple-ios$min
+          fi
+          echo "iPhoneOS SDK $sdk, plug-in deployment target $min ($target)"
           echo "IOS_MIN=$min" >> "$GITHUB_ENV"
-          echo "IOS_TARGET=arm64e-apple-ios$min" >> "$GITHUB_ENV"
+          echo "IOS_TARGET=$target" >> "$GITHUB_ENV"
       - name: Homebrew's build tools
         timeout-minutes: 20
         run: brew install ninja glslang shaderc spirv-tools bison llvm uv
@@ -91,6 +119,10 @@ jobs:
           rustup toolchain install 1.98.0 --profile minimal
           rustup +1.98.0 component add rust-src
           cargo +1.98.0 --version
+      - name: Rust ARM64 iOS standard library for the iPhone X guest
+        if: inputs.target == 'iPhone10,3 20F66'
+        timeout-minutes: 10
+        run: rustup +1.98.0 target add aarch64-apple-ios
       - name: The pinned sources
         timeout-minutes: 45
         run: |
@@ -99,11 +131,33 @@ jobs:
           kernel/fetch.sh Droid-VM-UniXNU
           scripts/setup/get-references.sh NativeMetal NativeAdreno NativeMobileDisplay AdrenoPM4 metal2vulkan mesa-droidvm
           scripts/setup/get-references.sh -l
-      - name: Check the toolchain (the image's custom stubs are optional)
-        timeout-minutes: 5
+      - name: Build oneios-tool for the iPhone X guest stubs
+        if: inputs.target == 'iPhone10,3 20F66'
+        timeout-minutes: 30
+        run: cargo +1.98.0 build --locked --release --manifest-path tools/oneios-tool/Cargo.toml
+      - name: Fetch only iPhone X SystemOS and derive its iOS 16.5 linker stubs
+        if: inputs.target == 'iPhone10,3 20F66'
+        timeout-minutes: 45
         run: |
           set -euo pipefail
-          if report=$(scripts/setup/ios-toolchain.sh 2>&1); then
+          tool=tools/oneios-tool/target/release/oneios-tool
+          "$tool" image fetch profiles/ios-16.5-a56.toml inputs/20F66 -j 8 --only systemos
+          "$tool" image apfs-copy inputs/20F66/096-04666-078.dmg System/Library/Caches/com.apple.dyld out/ios16-cache
+          "$tool" ios tbds --cache out/ios16-cache --out out/ios16-tbd
+          [ -s out/ios16-tbd/tbd.json ] && [ -s out/ios16-tbd/usr/lib/libSystem.B.tbd ] || {
+            echo "::error::iPhone X 20F66 did not produce its ARM64 dyld stubs"; exit 1;
+          }
+          echo "Derived iOS 16.5 ARM64 link stubs from the pinned 20F66 SystemOS cache. Apple inputs remain local to this job."
+      - name: Check the toolchain (the image's custom stubs are optional)
+        timeout-minutes: 5
+        env:
+          ONEIOS_METAL_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          if [ "$ONEIOS_METAL_TARGET" = 'iPhone10,3 20F66' ]; then
+            report=$(scripts/setup/ios-toolchain.sh 2>&1) || { printf '%s\n' "$report" >&2; echo "::error::The iOS 16.5 guest-stub toolchain check failed."; exit 1; }
+            printf '%s\n' "$report"
+          elif report=$(scripts/setup/ios-toolchain.sh 2>&1); then
             printf '%s\n' "$report"
           elif [[ "$report" == "ios toolchain: missing: the iOS 27 stubs in "*" (scripts/setup/ios-toolchain.sh --tbd, after the image set is built)" ]]; then
             printf '%s\n' "$report"
@@ -117,11 +171,13 @@ jobs:
         timeout-minutes: 120
         env:
           ONEIOS_METAL_TARGET: ${{ inputs.target }}
+          METAL_OUT: out/userland
           JOBS: '6'
         run: |
           set -euo pipefail
           userland/metal/build.sh all 2>&1 | tee metal-build.log
       - name: Build the capture plug-in for the same guest runtime
+        if: inputs.target != 'iPhone10,3 20F66'
         timeout-minutes: 10
         run: userland/camera/build.sh out/userland/camera
       - name: Verify the target-tagged bundle and GPU addon
@@ -136,22 +192,30 @@ jobs:
           check=out/userland/NativeAdrenoMetal.check.txt
           runtime=out/userland/NativeAdrenoMetal.runtime
           camera=out/userland/camera/H9ISP.mediacapture
-          for file in "$bundle/NativeAdrenoMetal" "$bundle/libvulkan_freedreno.dylib" "$bundle/oneios-target" "$addon" "$cdhashes" "$record" "$check" "$runtime" "$camera"; do
+          for file in "$bundle/NativeAdrenoMetal" "$bundle/libvulkan_freedreno.dylib" "$bundle/oneios-target" "$addon" "$cdhashes" "$record" "$check" "$runtime"; do
             [ -s "$file" ] || { echo "::error::Required Metal build output is missing or empty: $file"; exit 1; }
           done
           [ "$(cat "$bundle/oneios-target")" = "$ONEIOS_METAL_TARGET" ] || { echo "::error::Bundle target does not match $ONEIOS_METAL_TARGET"; exit 1; }
           grep -Fq "\"target\": \"$ONEIOS_METAL_TARGET\"" "$record" || { echo "::error::Build record target does not match $ONEIOS_METAL_TARGET"; exit 1; }
-          grep -Fq '"arch": "arm64e"' "$record" || { echo "::error::Build record does not identify arm64e binaries"; exit 1; }
+          expected_arch=arm64e
+          if [ "$ONEIOS_METAL_TARGET" = 'iPhone10,3 20F66' ]; then
+            expected_arch=arm64
+          else
+            [ -s "$camera" ] || { echo "::error::The iOS 27 capture plug-in is missing"; exit 1; }
+          fi
+          grep -Fq "\"arch\": \"$expected_arch\"" "$record" || { echo "::error::Build record does not identify $expected_arch binaries"; exit 1; }
           grep -Fq 'ios macho-check passed' "$record" || { echo "::error::Build record does not confirm the Mach-O check"; exit 1; }
           manifest=out/userland/NativeAdrenoMetal.sha256
           find "$bundle" -type f -print0 | xargs -0 shasum -a 256 > "$manifest"
-          shasum -a 256 "$addon" "$cdhashes" "$record" "$check" "$runtime" "$camera" >> "$manifest"
+          shasum -a 256 "$addon" "$cdhashes" "$record" "$check" "$runtime" >> "$manifest"
+          if [ -s "$camera" ]; then shasum -a 256 "$camera" >> "$manifest"; fi
           cat "$manifest"
           {
             echo "### Metal plug-in outputs verified"
             echo "- Target: \`$ONEIOS_METAL_TARGET\`"
             echo "- Bridge runtime: \`$(cat "$runtime")\`"
-            echo "- Bundle, arm64e binaries, Mach-O check, build record, capture plug-in, NGPUADD2 sidecar, and its phone-staging CDHashes are present."
+            echo "- Bundle, $expected_arch binaries, Mach-O check, build record, NGPUADD2 sidecar, and its phone-staging CDHashes are present."
+            if [ -s "$camera" ]; then echo "- Capture plug-in is present."; else echo "- Capture plug-in omitted; it has not been ported to this guest."; fi
             echo "- SHA-256 manifest: \`out/userland/NativeAdrenoMetal.sha256\`"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: What was built
@@ -166,7 +230,7 @@ jobs:
         if: always()
         timeout-minutes: 10
         with:
-          name: NativeAdrenoMetal
+          name: ${{ inputs.artifact_name }}
           if-no-files-found: error
           retention-days: 14
           path: |

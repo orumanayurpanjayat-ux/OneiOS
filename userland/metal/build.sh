@@ -1,10 +1,11 @@
 #!/bin/bash
-# Build the Metal plug-in, NativeAdrenoMetal.bundle, for iOS 27 arm64e on macOS (Xcode) or Linux, for this guest's shared cache.
+# Build the Metal plug-in, NativeAdrenoMetal.bundle, for a supported guest's architecture and shared cache.
 #
 #   scripts/bg.sh metal userland/metal/build.sh            everything (about 25 minutes the first time)
 #   userland/metal/build.sh stage|turnip|plugin|finish|addon   one step
 #   ONEIOS_METAL_TARGET="iPhone18,2 24B156" userland/metal/build.sh   for iOS 27.2.1 (hooks/iPhone18,2-24B156.json), in
 #                               out/userland-24B156 (the default target, iPhone18,2 24A446, is out/userland's)
+#   ONEIOS_METAL_TARGET="iPhone10,3 20F66" userland/metal/build.sh   for the iPhone X iOS 16.5 guest (arm64, no cache-address hooks)
 #   METAL_RUNTIME=rt userland/metal/build.sh ...            the same with the bridge on metal2vulkan-rt (userland/metal/rt: the
 #                               pin development 6462199fa and its patches, the bridge rewritten on its API), in out/metal-rt and
 #                               out/userland-rt unless METAL_WORK and METAL_OUT say otherwise; the default stays 624bab3
@@ -15,7 +16,7 @@
 #                               turnip-idle-bo-cache.patch and turnip-submit-split.patch) with the darwin virtio-gpu backend, a Mach-O dylib
 #   libadreno_metal_bridge.a    metal2vulkan (external/metal2vulkan 624bab3 + NativeMetal bridge/patches + Droid-VM-UniXNU
 #                               patches/metal2vulkan + this folder's m2v-spare-command-pools.patch, m2v-idle-memory.patch and m2v-compile-deadline.patch) behind
-#                               NativeMetal's C ABI; Rust, arm64e-apple-ios, std from source
+#                               NativeMetal's C ABI; Rust, arm64-apple-ios (or arm64e-apple-ios on 27)
 #   NativeAdrenoMetal           external/NativeMetal b0d6a07: the plug-in and the Metal frontend, linked with the bridge
 #                               (GpuScanoutPresenter.h includes the wire header of external/NativeMobileDisplay)
 #   -> out/userland/NativeAdrenoMetal.bundle (Info.plist, NativeAdrenoMetal, libvulkan_freedreno.dylib, oneios-target)
@@ -23,12 +24,13 @@
 #      out/userland/NativeAdrenoMetal.build.json: the SDK and stubs used, the pins, sizes and CDHashes
 #
 # How: the kernel base's own build scripts (Droid-VM-UniXNU scripts/build-turnip-darwin.py, build-adreno-metal-bridge.py,
-# build-adreno-metal-plugin.py, --target ios27) run from a staged copy of its tree (out/metal/root), with this folder's
+# build-adreno-metal-plugin.py) run from a staged copy of its tree (out/metal/root), with this folder's
 # shim/ in front of PATH: xcrun's clang is scripts/ios/ios-clang (so every link is against the guest's stubs), codesign
 # is `oneios-tool ios codesign` over `ios sign` (byte for byte Apple's codesign for a thin file; no bundle seal), strip and nm the linker's
 # siblings. On macOS ios-clang is Xcode's clang and ld, and xcrun's other answers are Xcode's; on Linux the cross toolchain.
-# The staged copies differ from upstream in the few lines `stage` prints. Before the compile, the plug-in's shared
-# cache addresses are replaced with this guest's (hooks/<product>-<build>.json) and OneiOS files are appended: for
+# The staged copies differ from upstream in the few lines `stage` prints. Before the compile, supported builds with
+# checked-in QuartzCore hooks get this guest's shared-cache addresses; 20F66 deliberately disables private-address
+# display hooks until they are derived from that exact cache. OneiOS files are appended: for
 # backboardd drivers/brightness/BacklightMode.inc and DisplayWide.inc (half floats with oneios-display-wide=1); for every
 # client DisplayLinks.inc (UIKit's animation links at the panel's rate), KeepRoom.inc (the pools' room kept ahead) and
 # CompileDeadline.inc (a longer compile deadline, not in backboardd); for SpringBoard SnapshotFormat.inc (app snapshots
@@ -50,6 +52,15 @@ HERE=$ROOT/userland/metal
 oneios_tool "$ROOT"     # (exported: the codesign shim runs it)
 TARGET_ID=${ONEIOS_METAL_TARGET:-iPhone18,2 24A446}
 HOOKS=$HERE/hooks/${TARGET_ID/ /-}.json
+case "$TARGET_ID" in
+  'iPhone10,3 20F66')
+    BUILD_TARGET=ios16
+    IOS_TBD=$ROOT/out/ios16-tbd IOS_MIN=16.5 IOS_TARGET=arm64-apple-ios16.5
+    export IOS_TBD IOS_MIN IOS_TARGET
+    ;;
+  'iPhone18,2 24A446'|'iPhone18,2 24B156') BUILD_TARGET=ios27 ;;
+  *) echo "metal: unsupported guest target $TARGET_ID" >&2; exit 2 ;;
+esac
 # The bridge's runtime: 624bab3 (the default, the base's bridge script) or rt (userland/metal/rt), each in its own folders.
 RUNTIME=${METAL_RUNTIME:-624bab3}
 case "$RUNTIME" in
@@ -57,10 +68,17 @@ case "$RUNTIME" in
   rt) DEFAULT_WORK=$ROOT/out/metal-rt DEFAULT_OUT=$ROOT/out/userland-rt ;;
   *) echo "metal: METAL_RUNTIME=$RUNTIME: 624bab3 or rt" >&2; exit 2 ;;
 esac
+if [ "$BUILD_TARGET" = ios16 ]; then
+  [ "$RUNTIME" = 624bab3 ] || { echo "metal: METAL_RUNTIME=rt has not been ported to iOS 16.5" >&2; exit 2; }
+  DEFAULT_WORK=$ROOT/out/metal-20F66
+  DEFAULT_OUT=$ROOT/out/userland-20F66
+fi
 # Another target than the default (the image's device and build, hooks/<device>-<build>.json): its own output folder,
 # out/userland-<build> (out/userland-rt-<build>), so that the default's bundle stays; the work folder is shared (stage
 # stages the sources again, only the plug-in is built again).
-[ "$TARGET_ID" = "iPhone18,2 24A446" ] || DEFAULT_OUT=$DEFAULT_OUT-${TARGET_ID#* }
+if [ "$BUILD_TARGET" = ios27 ] && [ "$TARGET_ID" != "iPhone18,2 24A446" ]; then
+  DEFAULT_OUT=$DEFAULT_OUT-${TARGET_ID#* }
+fi
 W=${METAL_WORK:-$DEFAULT_WORK}
 R=$W/root
 EXT=$ROOT/external
@@ -77,8 +95,13 @@ fi
 # cc-rs (the Rust crates' C and assembly) and rustc's own probes: the same compiler and SDK. On macOS SDKROOT stays
 # unset: the crates' build scripts are linked for the Mac with its SDK, and rustc asks xcrun (the shim) for iOS's.
 [ "$IOS_HOST" = Darwin ] || export SDKROOT=$IOS_SDK
-export CC_arm64e_apple_ios=$IOS_DIR/ios-clang CXX_arm64e_apple_ios=$IOS_DIR/ios-clang++
-export AR_arm64e_apple_ios=$AR CARGO_TARGET_ARM64E_APPLE_IOS_LINKER=$IOS_DIR/ios-clang
+if [ "$BUILD_TARGET" = ios16 ]; then
+  export CC_aarch64_apple_ios=$IOS_DIR/ios-clang CXX_aarch64_apple_ios=$IOS_DIR/ios-clang++
+  export AR_aarch64_apple_ios=$AR CARGO_TARGET_AARCH64_APPLE_IOS_LINKER=$IOS_DIR/ios-clang
+else
+  export CC_arm64e_apple_ios=$IOS_DIR/ios-clang CXX_arm64e_apple_ios=$IOS_DIR/ios-clang++
+  export AR_arm64e_apple_ios=$AR CARGO_TARGET_ARM64E_APPLE_IOS_LINKER=$IOS_DIR/ios-clang
+fi
 
 say() { echo "metal: $*"; }
 
@@ -186,10 +209,14 @@ stage() {
   # that runs in backboardd; the file is appended whole, so its constructor is in the plug-in's image.
   cat "$ROOT/drivers/brightness/BacklightMode.inc" >> "$R/drivers/AdrenoMetal/NativeAdrenoMetalPlugin.mm"
   say "staged NativeAdrenoMetalPlugin.mm: drivers/brightness/BacklightMode.inc appended (backboardd: initBLControl: mode 3 -> 1; useSyncBrightnessTransactionForDisplay: NO)"
-  # userland/metal/DisplayWide.inc (owner: display): with the kernel's oneios-display-wide=1 (xnuhost's
-  # display-format=rgba16f) backboardd's framebuffer is half floats ('RGhA'), which the display path then keeps whole.
-  cat "$HERE/DisplayWide.inc" >> "$R/drivers/AdrenoMetal/NativeAdrenoMetalPlugin.mm"
-  say "staged NativeAdrenoMetalPlugin.mm: userland/metal/DisplayWide.inc appended (backboardd: CA_FORCE_FP16_FRAMEBUFFER with oneios-display-wide=1)"
+  # DisplayWide.inc writes QuartzCore cache state using target-specific hooks. The iPhone X guest's 20F66 cache has
+  # no derived hook map yet, so leave its framebuffer format alone until those offsets are verified from that cache.
+  if [ "$BUILD_TARGET" = ios16 ]; then
+    say "iPhone X 20F66: kept the default framebuffer format; no private QuartzCore offsets are known for this cache"
+  else
+    cat "$HERE/DisplayWide.inc" >> "$R/drivers/AdrenoMetal/NativeAdrenoMetalPlugin.mm"
+    say "staged NativeAdrenoMetalPlugin.mm: userland/metal/DisplayWide.inc appended (backboardd: CA_FORCE_FP16_FRAMEBUFFER with oneios-display-wide=1)"
+  fi
   # userland/metal/DisplayLinks.inc (owner: display): UIKit's in-process animations at the panel's rate (oneios-dl-full=0: off).
   cat "$HERE/DisplayLinks.inc" >> "$R/drivers/AdrenoMetal/NativeAdrenoMetalPlugin.mm"
   say "staged NativeAdrenoMetalPlugin.mm: userland/metal/DisplayLinks.inc appended (UIKit's in-process animation links at the panel's rate; oneios-dl-full=0: off)"
@@ -230,26 +257,31 @@ turnip_cross_inputs() {
 }
 
 turnip() {
-  local dir=$R/build/mesa-tu-ios27 rec=$R/build/mesa-tu-ios27.cross-inputs now
+  local dir=$R/build/mesa-tu-$BUILD_TARGET rec=$R/build/mesa-tu-$BUILD_TARGET.cross-inputs now
   now=$(turnip_cross_inputs)
   if [ -f "$dir/build.ninja" ] && [ -f "$rec" ] && [ "$(cat "$rec")" != "$now" ]; then
     say "turnip: the cross file's inputs changed since $dir was set up: removed, meson sets it up again"
     rm -rf "$dir"
   fi
-  (cd "$R" && python3 scripts/build-turnip-darwin.py --target ios27) && printf '%s\n' "$now" > "$rec"
+  (cd "$R" && python3 scripts/build-turnip-darwin.py --target "$BUILD_TARGET") && printf '%s\n' "$now" > "$rec"
 }
 
 plugin() {
   # METAL_RUNTIME=rt: the bridge library is metal2vulkan-rt's, built into the place the plug-in script links (its stage
   # edit took the old bridge's build out).
   if [ "$RUNTIME" = rt ]; then
-    "$ROOT/userland/metal/rt/build.sh" ios "$R/build/adreno-metal-bridge/ios27/libadreno_metal_bridge.a"
+    "$ROOT/userland/metal/rt/build.sh" ios "$R/build/adreno-metal-bridge/$BUILD_TARGET/libadreno_metal_bridge.a"
   fi
-  (cd "$R" && python3 scripts/build-adreno-metal-plugin.py --target ios27)
+  (cd "$R" && python3 scripts/build-adreno-metal-plugin.py --target "$BUILD_TARGET")
 }
 
 finish() {
-  local built=$R/build/adreno-metal-plugin27/NativeAdrenoMetal.bundle bundle=$OUT/NativeAdrenoMetal.bundle
+  local plugin_build=adreno-metal-plugin27 mach_arch=arm64e
+  if [ "$BUILD_TARGET" = ios16 ]; then
+    plugin_build=adreno-metal-plugin16
+    mach_arch=arm64
+  fi
+  local built=$R/build/$plugin_build/NativeAdrenoMetal.bundle bundle=$OUT/NativeAdrenoMetal.bundle
   [ -f "$built/NativeAdrenoMetal" ] && [ -f "$built/libvulkan_freedreno.dylib" ] || { echo "metal: no built bundle in $built" >&2; exit 1; }
   mkdir -p "$OUT"
   rm -rf "$bundle"
@@ -257,11 +289,11 @@ finish() {
   # The file the root tweaks look for: this bundle's addresses are this guest's.
   echo "$TARGET_ID" > "$bundle/oneios-target"
   if [ -s "$IOS_TBD/usr/lib/libSystem.B.tbd" ]; then
-    "$ONEIOS_TOOL" ios macho-check --tbd "$IOS_TBD" --local "$bundle/libvulkan_freedreno.dylib" \
+    "$ONEIOS_TOOL" ios macho-check --arch "$mach_arch" --tbd "$IOS_TBD" --local "$bundle/libvulkan_freedreno.dylib" \
       "$bundle/NativeAdrenoMetal" "$bundle/libvulkan_freedreno.dylib" | tee "$OUT/NativeAdrenoMetal.check.txt"
   else
     say "guest shared-cache stubs are unavailable; checking against the iPhoneOS SDK stubs"
-    "$ONEIOS_TOOL" ios macho-check --sdk --local "$bundle/libvulkan_freedreno.dylib" \
+    "$ONEIOS_TOOL" ios macho-check --arch "$mach_arch" --sdk --local "$bundle/libvulkan_freedreno.dylib" \
       "$bundle/NativeAdrenoMetal" "$bundle/libvulkan_freedreno.dylib" | tee "$OUT/NativeAdrenoMetal.check.txt"
   fi
   "$ONEIOS_TOOL" ios metal-record "$ROOT" "$bundle" "$OUT/NativeAdrenoMetal.build.json" "$HOOKS" "$TARGET_ID"
