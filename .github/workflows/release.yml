@@ -9,7 +9,9 @@
 #
 # apk-macos waits for metal because both jobs use the limited xcode-27 runner pool.
 #
-# Triggers: a pull request or a push to main builds both and releases nothing. A tag vN.N.N[-suffix] on main builds
+# Triggers: a pull request or a push builds the applicable products and releases nothing. When only the app/ submodule
+# pointer plus this CI planner/docs change, CI skips the runtime and its Metal build (the runtime job never checks out
+# app/), while still building and testing the APK. A tag vN.N.N[-suffix] on main builds
 # both and releases both. A dispatch (Actions, "build and release", Run workflow) on main takes a version,
 # "both", "runtime only" or "apk only", and optionally a successful `metal-plugin` run ID to reuse.
 # The runtime job never checks out app/: the fork's tree cannot reach the package. Nothing of Apple's, Samsung's,
@@ -80,6 +82,34 @@ jobs:
             release=true version=${IN_VERSION#v}
             case "$IN_BUILD" in both) ;; "runtime only") apk=false ;; "apk only") runtime=false ;;
               *) echo "::error::build '$IN_BUILD' is not both, runtime only or apk only"; exit 1 ;; esac
+          fi
+          # The runtime workflow never checks out app/: an app-only submodule update cannot change its package.
+          # Allow this workflow's planner and documentation alongside the app pointer; any other changed path keeps
+          # the full runtime/Metal validation. Explicit workflow_dispatch choices and tagged releases are untouched.
+          if [ "$EVENT" = pull_request ] || { [ "$EVENT" = push ] && [ "$release" = false ]; }; then
+            base= head=
+            if [ "$EVENT" = pull_request ]; then
+              base=$(jq -r '.pull_request.base.sha // empty' "$GITHUB_EVENT_PATH")
+              head=$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH")
+            else
+              base=$(jq -r '.before // empty' "$GITHUB_EVENT_PATH")
+              head=$GITHUB_SHA
+            fi
+            if [[ "$base" =~ ^[0-9a-f]{40}$ && "$head" =~ ^[0-9a-f]{40}$ ]] && [ "$base" != "0000000000000000000000000000000000000000" ]; then
+              changed=$(git diff --name-only --no-renames "$base" "$head")
+              app_changed=false runtime_input_changed=false
+              while IFS= read -r path; do
+                case "$path" in
+                  app) app_changed=true ;;
+                  .github/workflows/release.yml|docs/releases.md) ;;
+                  *) runtime_input_changed=true ;;
+                esac
+              done <<< "$changed"
+              if [ "$app_changed" = true ] && [ "$runtime_input_changed" = false ]; then
+                runtime=false
+                echo "Only the app submodule and its CI planner/docs changed; skipping the runtime and Metal build. APK CI remains enabled."
+              fi
+            fi
           fi
           if [ -n "$metal_run_id" ]; then
             [ "$EVENT" = workflow_dispatch ] || { echo "::error::metal_run_id is only accepted on a workflow dispatch"; exit 1; }
