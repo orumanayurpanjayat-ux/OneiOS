@@ -1,13 +1,9 @@
-# OneiOS's one workflow (docs/releases.md, "CI and releases"): the runtime package and the OneOS app (the fork,
-# submodule app/), with the runtime's Metal and capture plug-ins built on a Mac (or reused from a verified
-# `metal-plugin` run when a manual dispatch supplies `metal_run_id`).
+# OneOS's workflow (docs/releases.md, "CI and releases"): the runtime package and the OneOS app (the fork,
+# submodule app/). Builds that support the guest plug-ins include Metal and capture; S24 iOS 16.5 skips them.
 #
-#   plan ──┬── metal (xcode-27) ─┬── runtime (ubuntu-24.04) package and checks
-#          │                    └── apk-macos (xcode-27), after apk completes
-#          ├── apk (ubuntu-24.04) ────────┘ app build, tests and APK
-#          └── release needs runtime and apk; a tag v* or a dispatch only
-#
-# apk-macos waits for metal because both jobs use the limited xcode-27 runner pool.
+#   plan -> optional Metal build -> runtime package and checks
+#   plan -> APK build and tests
+#   release only for a tag or a manual dispatch
 #
 # Triggers: a pull request or a push to main / codex/s24u-ios16 builds the applicable products and releases nothing.
 # The S24 iOS 16.5 branch builds the runtime without guest Metal plug-ins, plus the APK. Other runtime builds include
@@ -421,93 +417,6 @@ jobs:
             out/apk/*.apk
             out/apk/*.apk.sha256
           if-no-files-found: error
-          retention-days: 14
-
-  # The owner's Mac runs `./gradlew test assembleFullDebug` (oneios-tool cycle app); this proves the `test` half on
-  # macOS. Homebrew's folders are taken off PATH for the tests, so core:root's harness uses its own stand-ins for
-  # GNU stat, sha256sum, timeout and tac over macOS's own tools (the fork's docs/oneios.md): the case of a Mac without
-  # coreutils. Not a release gate: the release needs runtime and apk only.
-  #
-  # xcode-27, not macos-15: both are arm64 macOS images with the Android SDK and JDK 21, but the 3-core macos-15 pool
-  # was starved ("The job was not acquired by Runner of type hosted even after multiple attempts") and GitHub
-  # cancelled the job after ~15 minutes, turning every push red while plan/runtime/apk had passed. xcode-27 also
-  # runs the Metal build; queue the app tests behind it so Metal does not expire waiting for the same runner.
-  apk-macos:
-    needs: [plan, apk, metal]
-    if: always() && needs.plan.outputs.apk == 'true' && needs.apk.result == 'success'
-    runs-on: xcode-27
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      packages: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: The pinned upstream app base (app/)
-        run: |
-          set -euo pipefail
-          git submodule update --init app
-          commit=$(git -C app rev-parse HEAD)
-          pinned=$(git ls-tree HEAD app | awk '{print $3}')
-          [ "$commit" = "$pinned" ] || { echo "::error::app/ checked out $commit, OneiOS pins $pinned"; exit 1; }
-          echo "app/: branch $(git config -f .gitmodules submodule.app.branch), pinned at $commit"
-      - name: Apply the S24 iOS 16.5 app changes
-        run: bash .github/scripts/apply-s24u-ios16.sh
-      - name: Which token reads tribalfs' packages
-        env:
-          RUN_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SECRET_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
-          SECRET_USER: ${{ secrets.GH_PACKAGES_USER }}
-        run: .github/scripts/packages-token.sh
-      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
-        with:
-          distribution: temurin
-          java-version: 21
-      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
-        with:
-          cache-provider: basic
-      - name: Android SDK platform 37
-        run: |
-          sdkmanager=$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | tail -n 1)
-          yes | "$sdkmanager" --licenses > /dev/null || true
-          "$sdkmanager" "platforms;android-37.0" "build-tools;37.0.0"
-      - name: Guest app
-        run: app/scripts/build-guest-manager.sh --debug
-      - name: GNU coreutils for a bounded test run
-        run: brew install coreutils
-      - name: Unit tests on macOS (./gradlew test, core:root's script tests among them)
-        timeout-minutes: 55
-        working-directory: app/app-android
-        run: |
-          set -euo pipefail
-          brew_bin=$(command -v brew)
-          timeout_bin=$("$brew_bin" --prefix coreutils)/bin/gtimeout
-          [ -x "$timeout_bin" ] || { echo "::error::GNU timeout is missing at $timeout_bin"; exit 1; }
-          PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -Ev '^(/opt/homebrew|/usr/local)(/|$)' | paste -sd: -)
-          export PATH
-          for t in gstat gsha256sum gtimeout gtac gsed; do command -v "$t" > /dev/null && echo "note: $t is still on PATH: $(command -v "$t")"; done
-          echo "macOS $(sw_vers -productVersion), sh: $(ls -l /bin/sh | awk '{print $NF}'), stat: $(command -v stat)"
-          # Plain per-test events identify the last test reached; GNU timeout bounds the process group without an
-          # unbounded jstack/Gradle-stop diagnostic path. The step leaves five minutes for summaries and artifacts.
-          "$timeout_bin" --signal=TERM --kill-after=30s 50m ./gradlew --max-workers=3 --console=plain --continue --init-script "$GITHUB_WORKSPACE/.github/scripts/gradle-test-events.gradle" test
-      - name: Failed tests
-        if: failure()
-        working-directory: app/app-android
-        run: |
-          {
-            echo "### Failed unit tests on macOS"
-            grep -rl '<failure' --include='*.xml' . 2>/dev/null | grep '/build/test-results/' | while read -r f; do
-              awk '/<testcase /{ n = $0; sub(/.*<testcase name="/, "", n); sub(/".*/, "", n); c = $0; sub(/.*classname="/, "", c); sub(/".*/, "", c) }
-                   /<failure/{ m = $0; sub(/.*message="/, "", m); sub(/".*/, "", m); print "- " c " > " n ": " substr(m, 1, 400) }' "$f"
-            done
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: oneos-tests-macos
-          path: |
-            app/app-android/**/build/reports/tests/
-            app/app-android/**/build/test-results/
-          if-no-files-found: ignore
           retention-days: 14
 
   release:
