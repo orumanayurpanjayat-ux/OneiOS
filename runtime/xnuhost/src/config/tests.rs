@@ -981,14 +981,9 @@ fn s24_display_boot_args_replace_the_copied_a56_rate_and_scale_once() {
 #[test]
 fn s24_display_boot_args_keep_explicit_display_additions_only_when_applied() {
     let mut args = "-v offline-legacy-unit-scale=2 sheng-vsync=90 sheng-vsync-fixed=0".to_owned();
-    assert!(s24_display_boot_args(
-        &mut args,
-        "sheng-vsync=90 sheng-vsync-fixed=0 oneios-gpu-metal=1",
-        128,
-        3,
-        120
-    )
-    .is_ok());
+    assert!(
+        s24_display_boot_args(&mut args, "sheng-vsync=90 sheng-vsync-fixed=0 oneios-gpu-metal=1", 128, 3, 120).is_ok()
+    );
     assert_eq!(args, "-v offline-legacy-unit-scale=3 sheng-vsync=90 sheng-vsync-fixed=0");
 
     // An image's A56 value beats a conflicting boot-args-add word, so the S24 profile still corrects that default.
@@ -1224,9 +1219,9 @@ fn host_device() {
     assert!(c.host_line.contains(
         "host: galaxy-s24-ultra (Galaxy S24 Ultra (SM-S928, SM8650)), matched by ro.product.model=SM-S928B; read: "
     ));
-    assert!(c.host_line.contains(
-        "; defaults: gpu=auto, panel-fallback=1440x3120@120, width=1440, height=3120, scale=3, hz=120"
-    ));
+    assert!(c
+        .host_line
+        .contains("; defaults: gpu=auto, panel-fallback=1440x3120@120, width=1440, height=3120, scale=3, hz=120"));
     assert!(c.gpu == Gpu::Auto && c.width == 1440 && c.height == 3120 && c.scale == 3 && c.hz == 120);
     assert_eq!(c.panel_fallback, Some(PanelMode { width: 1440, height: 3120, hz: 120 }));
     let s24_defaults = host_clear(c);
