@@ -974,7 +974,7 @@ fn s24_display_boot_args_replace_the_copied_a56_rate_and_scale_once() {
     assert_eq!(args.matches("sheng-vsync-fixed=").count(), 1);
     let mut short = "-v offline-legacy-unit-scale=2 sheng-vsync=60".to_owned();
     let before = short.clone();
-    assert!(s24_display_boot_args(&mut short, before.len() + 1, 3, 120).is_err());
+    assert!(s24_display_boot_args(&mut short, "", before.len() + 1, 3, 120).is_err());
     assert_eq!(short, before); // no partial policy change when the boot-argument buffer is too small
 }
 
