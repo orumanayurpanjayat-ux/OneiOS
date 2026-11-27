@@ -202,8 +202,9 @@ fn host_device() {
     env::set_var("ONEIOS_HOST_PROPS", phone(&tmp, "s24u", "SM-S928B", "e3q", "pineapple", "SM8650", "QTI"));
     let (e, line) = host_tool(&mut hw).unwrap();
     assert!(e == Some(&t[0]) && line.contains("host: galaxy-s24-ultra, matched by ro.product.model=SM-S928B;"));
+    // This bridge diagnostic reports environment overrides only; xnuhost reports the S24 runtime's frame/GPU defaults.
     assert!(
-        line.contains("; defaults: gpu=auto, panel-fallback=1440x3120@120, width=1440, height=3120, scale=3, hz=120")
+        line.contains("; defaults: none (today's)")
             && env::var("ONEIOS_BRIGHT_MAX").is_err()
     );
     env::set_var("ONEIOS_HOST_PROPS", phone(&tmp, "pixel", "Pixel 11 Pro", "frankel", "zuma", "Tensor G5", "Google"));
