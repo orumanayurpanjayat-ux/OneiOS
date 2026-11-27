@@ -602,10 +602,8 @@ impl Session {
                             .map(|blob| crate::addon::Addon { blob, cdhashes: Vec::new() })
                             .or_else(|| crate::addon::runtime_addon(&config.runtime))
                     });
-                    let found = gpu3d_amdgpu::plugin_in_addon(
-                        addon.as_ref().map(|a| a.blob.as_slice()),
-                        build.as_deref(),
-                    );
+                    let found =
+                        gpu3d_amdgpu::plugin_in_addon(addon.as_ref().map(|a| a.blob.as_slice()), build.as_deref());
                     addon_read = Some(addon);
                     found
                 },
