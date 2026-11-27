@@ -329,7 +329,7 @@ index cce2435..cd7ab7f 100644
  
      /**
 diff --git a/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/OneiosPlain.kt b/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/OneiosPlain.kt
-index 1d4bf86..366ffea 100644
+index 1d4bf86..fe77ab9 100644
 --- a/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/OneiosPlain.kt
 +++ b/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/OneiosPlain.kt
 @@ -1,7 +1,7 @@
@@ -366,7 +366,7 @@ index 1d4bf86..366ffea 100644
              )
              "no ios image set is staged" in p -> m(
 -                "Make your iOS image", "This phone downloads iOS 27.0.1 from Apple and builds it itself. Or choose an image set you have.",
-+                "Make your iOS image", "Build an iOS image from Apple's files, or choose an image set you already have.",
++                "Make your iOS image", "This phone can build an iOS image from Apple's files, or choose an image set you already have.",
                  OneiosFix.IMPORT_IMAGE, OneiosPart.IMAGE, Level.INFO,
              )
              ("oneios_switch.sh" in p || "oneios_return.sh" in p) && ("missing" in p || "not staged" in p || "not root's" in p) -> m(
