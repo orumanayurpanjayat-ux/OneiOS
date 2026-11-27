@@ -320,16 +320,19 @@ jobs:
       signed_with: ${{ steps.apk.outputs.signed_with }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: The fork at the head of its branch (app/)
+      - name: The pinned upstream app base (app/)
         id: fork
         run: |
           set -euo pipefail
-          git submodule update --init --remote app
+          git submodule update --init app
           branch=$(git config -f .gitmodules submodule.app.branch)
           commit=$(git -C app rev-parse HEAD)
           pinned=$(git ls-tree HEAD app | awk '{print $3}')
-          echo "app/: $(git config -f .gitmodules submodule.app.url) branch $branch at $commit (recorded in OneiOS: $pinned)"
+          [ "$commit" = "$pinned" ] || { echo "::error::app/ checked out $commit, OneiOS pins $pinned"; exit 1; }
+          echo "app/: $(git config -f .gitmodules submodule.app.url) branch $branch, pinned at $commit"
           { echo "branch=$branch"; echo "commit=$commit"; } >> "$GITHUB_OUTPUT"
+      - name: Apply the S24 iOS 16.5 app changes
+        run: bash .github/scripts/apply-s24u-ios16.sh
       - name: Which token reads tribalfs' packages
         env:
           RUN_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -407,7 +410,7 @@ jobs:
           {
             echo "### OneOS APK"
             echo "- \`$OUT\`: versionName $VNAME, versionCode $VCODE, $(stat -c %s "out/apk/$OUT") bytes, SHA-256 \`$(cut -d' ' -f1 "out/apk/$OUT.sha256")\`"
-            echo "- fork commit \`$FORK\` (akshaynexus/OneOS, the head of its branch)"
+            echo "- upstream app base commit \`$FORK\` (pinned); the S24 iOS 16.5 source overlay is applied for this branch"
             echo "- tribalfs' packages were read with: $PACKAGES_TOKEN_USED"
             echo "- signed with $SIGNED_WITH"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -439,11 +442,16 @@ jobs:
       packages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: The fork at the head of its branch (app/)
+      - name: The pinned upstream app base (app/)
         run: |
           set -euo pipefail
-          git submodule update --init --remote app
-          echo "app/: branch $(git config -f .gitmodules submodule.app.branch) at $(git -C app rev-parse HEAD)"
+          git submodule update --init app
+          commit=$(git -C app rev-parse HEAD)
+          pinned=$(git ls-tree HEAD app | awk '{print $3}')
+          [ "$commit" = "$pinned" ] || { echo "::error::app/ checked out $commit, OneiOS pins $pinned"; exit 1; }
+          echo "app/: branch $(git config -f .gitmodules submodule.app.branch), pinned at $commit"
+      - name: Apply the S24 iOS 16.5 app changes
+        run: bash .github/scripts/apply-s24u-ios16.sh
       - name: Which token reads tribalfs' packages
         env:
           RUN_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -581,7 +589,7 @@ jobs:
               echo "- **No runtime** in this release (built as \"apk only\"): it is not marked latest, so the app's runtime download keeps the latest release that has one."
             fi
             if [ "$HAS_APK" = true ]; then
-              echo "- **OneOS app** \`$APK\` (+ \`.sha256\`, SHA-256 \`$APK_SHA256\`): versionName **$APK_NAME**, versionCode **$APK_CODE**, the full edition's debug build of [akshaynexus/OneOS](https://github.com/akshaynexus/OneOS) branch \`$FORK_BRANCH\` at commit [\`$FORK_COMMIT\`](https://github.com/akshaynexus/OneOS/commit/$FORK_COMMIT) (the head of the branch when it was built). Signed with $SIGNED_WITH. It carries no system image and no package set (checked by \`.github/scripts/check-apk.sh\`): the Android sets are downloaded by the app, the iOS image set is one you build yourself."
+              echo "- **OneOS app** \`$APK\` (+ \`.sha256\`, SHA-256 \`$APK_SHA256\`): versionName **$APK_NAME**, versionCode **$APK_CODE**, the full edition's debug build of [akshaynexus/OneOS](https://github.com/akshaynexus/OneOS) branch \`$FORK_BRANCH\` at pinned commit [\`$FORK_COMMIT\`](https://github.com/akshaynexus/OneOS/commit/$FORK_COMMIT). The S24 iOS 16.5 branch source overlay is applied before build. Signed with $SIGNED_WITH. It carries no system image and no package set (checked by \`.github/scripts/check-apk.sh\`): the Android sets are downloaded by the app, the iOS image set is one you build yourself."
             else
               echo "- **No APK** in this release (built as \"runtime only\")."
             fi

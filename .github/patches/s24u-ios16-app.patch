@@ -1,0 +1,873 @@
+diff --git a/app-android/app/src/full/assets/root/oneios_root.sh b/app-android/app/src/full/assets/root/oneios_root.sh
+index 2c83c36..951e1ba 100644
+--- a/app-android/app/src/full/assets/root/oneios_root.sh
++++ b/app-android/app/src/full/assets/root/oneios_root.sh
+@@ -760,7 +760,7 @@ kc_activate() { # <dir> <kc-sha256> <build-id>: <dir>'s kernel.kc + hashes becom
+ }
+ 
+ # --- The Galaxy A56's GPU addon (docs/oneios.md, "Kernel updates") ---------
+-# An iOS 16.5 (20F66) set gets the staged runtime's A56 gpuaddon (the Metal and
++# An iOS 16.5 (20F66) set on an A56 gets the staged runtime's A56 gpuaddon (the Metal and
+ # OpenGL ES plug-ins) as image/kernel.kc.gpuaddon, with its CDHashes in
+ # overlay/userland/owner-trust.json, in the same finish kernel, after the
+ # kernel is activated: the runtime's oneios-tool (`image a56-gpu-place`, the
+@@ -776,6 +776,14 @@ GPU_ADDON=kernel.kc.gpuaddon
+ # xnuhost's limit for the sidecar (docs/booter.md).
+ GPU_ADDON_MAX=67108864
+ 
++# This addon's renderer is for the A56's Exynos/Xclipse host. The S24 Ultra can
++# also build the same 20F66 image, but must keep its own Adreno GPU path.
++is_a56_host() {
++    case "$(getprop ro.product.model 2>/dev/null)" in SM-A566*) ;; *) return 1 ;; esac
++    [ "$(getprop ro.product.device 2>/dev/null)" = a56x ] || return 1
++    [ "$(getprop ro.soc.model 2>/dev/null)" = s5e8855 ]
++}
++
+ # A sha256sum list (<list>) with the changes of <changes> made, to stdout: a
+ # "<sha256> <path>" line replaces <path>'s line (or is added at the end when
+ # the list has none), "- <path>" removes it. The two spaces are kept, and the
+@@ -824,6 +832,10 @@ gpu_say() { # <placed|none|skipped> <words>: the finish's line (the app shows it
+ a56_gpu_place() {
+     GPU_LINE=""
+     [ "$(conf "$STAGE/image.conf" build)" = "$A56_GPU_BUILD" ] || return 0
++    if ! is_a56_host; then
++        gpu_say none "the A56 GPU addon is only enabled on the Galaxy A56; this host's GPU path is unchanged"
++        return 0
++    fi
+     if [ ! -f "$TOOL_BIN" ] || [ -L "$TOOL_BIN" ] || [ ! -x "$TOOL_BIN" ]; then
+         gpu_say none "this runtime has no bin/oneios-tool: the session stays 2D"
+         return 0
+diff --git a/app-android/app/src/full/kotlin/com/fahadali/oneos/session/OneiosJob.kt b/app-android/app/src/full/kotlin/com/fahadali/oneos/session/OneiosJob.kt
+index 1e1d7e5..58abc44 100644
+--- a/app-android/app/src/full/kotlin/com/fahadali/oneos/session/OneiosJob.kt
++++ b/app-android/app/src/full/kotlin/com/fahadali/oneos/session/OneiosJob.kt
+@@ -290,8 +290,9 @@ object OneiosJob : BackgroundJob<OneiosJob.State>(State(), "oneos-oneios") {
+     fun imageChoice(): OneiosImageChoice = imageChoices().first()
+ 
+     /**
+-     * Every image Make iOS image offers on this phone, the recommended one first ([OneiosImageChoice.choicesOf]): iOS
+-     * 27.0.1 (24A446), tested, and iOS 27.2.1 (24B156), not booted yet, on every phone but the A56; iOS 16.5 there.
++     * Every image Make iOS image offers on this phone, the recommended one first ([OneiosImageChoice.choicesOf]):
++     * iOS 16.5 (20F66) first on the S24 Ultra (experimental, not boot-tested there), followed by both iOS 27 choices;
++     * the Galaxy A56 keeps its iOS 16.5-only path.
+      */
+     fun imageChoices(): List<OneiosImageChoice> =
+         OneiosImageChoice.choicesOf(choiceProfile ?: Profiles.resolve(android.os.Build.MODEL.orEmpty(), android.os.Build.DEVICE.orEmpty(), android.os.Build.SOC_MODEL.orEmpty()).profile)
+@@ -707,7 +708,7 @@ object OneiosJob : BackgroundJob<OneiosJob.State>(State(), "oneos-oneios") {
+             if (!staged.ok) break
+         }
+         must(root(app, OneiosRoot.Verb.SWITCH, OneiosSystem.switchArgs(BuildConfig.VERSION_CODE, takeover), silenceMs = 180_000))
+-        // The staged set's own iOS: "iOS 16.5" on the A56 (issue 73), "iOS 27.0.1" or "iOS 27.2.1" (the last status
++        // The staged set's own iOS: "iOS 16.5" on the A56 or S24 Ultra, "iOS 27.0.1" or "iOS 27.2.1" (the last status
+         // read); the phone's recommended choice when none was read.
+         val name = OneiosSystem.shortName(state.status?.image?.version ?: OneiosImageChoice.of(profile).version)
+         if (takeover) "Switching to $name (Android takeover)…" else "Switching to $name…"
+diff --git a/app-android/app/src/full/kotlin/com/fahadali/oneos/session/OneiosToolJob.kt b/app-android/app/src/full/kotlin/com/fahadali/oneos/session/OneiosToolJob.kt
+index b7c4813..07a2408 100644
+--- a/app-android/app/src/full/kotlin/com/fahadali/oneos/session/OneiosToolJob.kt
++++ b/app-android/app/src/full/kotlin/com/fahadali/oneos/session/OneiosToolJob.kt
+@@ -10,6 +10,7 @@ import com.fahadali.oneos.core.model.OneiosKb
+ import com.fahadali.oneos.core.model.OneiosManifests
+ import com.fahadali.oneos.core.model.OneiosMessage
+ import com.fahadali.oneos.core.model.OneiosPlain
++import com.fahadali.oneos.core.model.Profiles
+ import com.fahadali.oneos.core.model.OneiosSystem
+ import com.fahadali.oneos.core.model.OneiosTool
+ import com.fahadali.oneos.core.model.OneiosToolFlow
+@@ -370,13 +371,17 @@ object OneiosToolJob : BackgroundJob<OneiosToolJob.State>(State(), "oneos-oneios
+      * Make iOS image ([OneiosMakeImage] decides the order): root's steps on their own `su`, the latest runtime by
+      * [OneiosJob.stageLatestForMakeImage] (no tool session is open then), each tool request shown as any flow's.
+      * [first] is the status [work] read (it installed this build's root script); [build] the user's pick
+-     * ([OneiosImageChoice.of] the phone's profile and it: iOS 27.0.1 when none). Returns false when the tool went
++     * ([OneiosImageChoice.of] the phone's profile and it: iOS 16.5 on the S24 Ultra or A56, iOS 27.0.1 otherwise).
++     * Returns false when the tool went
+      * away in a request (the flow stays remembered; its next run goes on from the fetched parts).
+      */
+     private fun runMake(app: Context, first: OneiosStatus, build: String?): Boolean {
+-        // The image this phone makes: the user's pick of the phone's choices (iOS 27.0.1 or 27.2.1; iOS 16.5 on the
+-        // Galaxy A56, untested there).
+-        val image = OneiosImageChoice.of(OneiosJob.phoneProfile(app), build)
++        // The S24 Ultra's new 20F66 path reuses the A56's pinned iPhone X image source. Host-specific GPU add-ons are
++        // guarded when the kernel is activated, so the image request stays on the runtime's documented contract.
++        val profile = OneiosJob.phoneProfile(app)
++        val image = OneiosImageChoice.of(profile, build)
++        val isS24Ios16 = profile?.id == Profiles.ID_S_ULTRA_8650 && image.build == OneiosImageChoice.IOS_16_5.build
++        val runtimePlugins = !isS24Ios16
+         val kb = try {
+             OneiosJob.kbInputs(app, image.kernelBuild)
+         } catch (e: OneiosJob.NoKb) {
+@@ -462,7 +467,7 @@ object OneiosToolJob : BackgroundJob<OneiosToolJob.State>(State(), "oneos-oneios
+             override val stopped: Boolean get() = stop
+         }
+         try {
+-            return when (val o = OneiosMakeImage(S, kb, assets, image).run(io)) {
++            return when (val o = OneiosMakeImage(S, kb, assets, image, runtimePlugins).run(io)) {
+                 is OneiosMakeImage.Outcome.Staged -> {
+                     update(state.copy(
+                         results = state.results + "iOS ${o.version} (${o.build}) is staged: ${o.files} files${o.bytes?.let { ", ${Units.bytes(it)}" }.orEmpty()}.",
+diff --git a/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosActions.kt b/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosActions.kt
+index 431cbed..d36f55b 100644
+--- a/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosActions.kt
++++ b/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosActions.kt
+@@ -178,8 +178,8 @@ internal object OneiosActions {
+ 
+     /**
+      * Make iOS image ([OneiosToolJob.Flow.MAKE_IMAGE]), asked first: which iOS this phone makes when it offers more
+-     * than one ([OneiosJob.imageChoices]: "iOS 27.0.1 (24A446), tested" first and recommended, then "iOS 27.2.1
+-     * (24B156), new: not booted yet", each with its download and the room it needs; the Galaxy A56 only iOS 16.5),
++     * than one ([OneiosJob.imageChoices]: on the S24 Ultra, iOS 16.5 (20F66), experimental and not boot-tested here,
++     * then the iOS 27 builds as fallback; the Galaxy A56 keeps iOS 16.5 only),
+      * then the pick's download (about 11 GB from Apple, once; iOS 16.5 about 5.8 GB), the free room it needs while it
+      * builds (the choice's room; the tool checks the exact room itself before it downloads anything) and the room this
+      * phone has now. The pick is what make-image builds. While the flow runs, its screen opens instead.
+diff --git a/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosActivity.kt b/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosActivity.kt
+index bd26c8a..c4c9dcf 100644
+--- a/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosActivity.kt
++++ b/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosActivity.kt
+@@ -199,7 +199,7 @@ class OneiosActivity : EdgeToEdgeActivity() {
+     /** A step's name on the page and on the button: the docs' words. */
+     private fun title(id: OneiosSteps.Id, @Suppress("UNUSED_PARAMETER") version: String?): String = id.title
+ 
+-    /** Switch to the staged system ("Switch to iOS 27", "Switch to iOS 16.5" on the Galaxy A56): the primary button. */
++    /** Switch to the staged system ("Switch to iOS 27", "Switch to iOS 16.5" on the A56 or S24 Ultra): the primary button. */
+     private fun switchLabel(version: String?): String =
+         if (version == null || OneiosSystem.isIos27(version)) getString(R.string.oneios_switch) else "Switch to ${OneiosSystem.shortName(version)}"
+ 
+diff --git a/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosLogsActivity.kt b/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosLogsActivity.kt
+index f5b1e4b..cc870a8 100644
+--- a/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosLogsActivity.kt
++++ b/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosLogsActivity.kt
+@@ -22,7 +22,7 @@ import java.time.ZoneId
+ import java.time.format.DateTimeFormatter
+ 
+ /**
+- * Session logs of the iOS 27 (OneiOS) system (docs/oneios.md): this session's
++ * Session logs of the OneiOS system (docs/oneios.md): this session's
+  * or the last one's xnuhost log and the five before it, each with the time of
+  * its last line, its size and how the session ended, and the switch's, the
+  * return's and the helpers' logs. A row opens the log ([OneiosLogActivity]);
+diff --git a/app-android/app/src/full/res/values/strings_oneios.xml b/app-android/app/src/full/res/values/strings_oneios.xml
+index 4d6361d..9268da5 100644
+--- a/app-android/app/src/full/res/values/strings_oneios.xml
++++ b/app-android/app/src/full/res/values/strings_oneios.xml
+@@ -1,34 +1,34 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <!-- The iOS 27 (OneiOS) system (docs/oneios.md, "In the app"): its card on Choose a system, Set up iOS 27,
++    <!-- The OneiOS system (docs/oneios.md, "In the app"): its card on Choose a system, setup, image and Switch flows,
+          its page, the Switch confirm and the switching screen. They follow the Android systems' screens and
+          reuse their strings (setup_*, confirm_switch_*, home_sheet_*, last_*) where the words are the same.
+          A refusal's plain words are OneiosPlain's (core/model), as the Android systems' are Plain's. -->
+-    <string name="oneios_title">iOS 27 (OneiOS)</string>
+-    <string name="oneios_short">iOS 27</string>
++    <string name="oneios_title">OneiOS</string>
++    <string name="oneios_short">iOS</string>
+     <string name="oneios_open">Open</string>
+-    <string name="oneios_set_up">Set up iOS 27</string>
+-    <string name="oneios_switch">Switch to iOS 27</string>
++    <string name="oneios_set_up">Set up OneiOS</string>
++    <string name="oneios_switch">Switch to iOS</string>
+     <string name="oneios_continue">Continue</string>
+-    <string name="oneios_not_this_phone_title">iOS 27 is mainly for the Galaxy S24 Ultra</string>
+-    <string name="oneios_not_this_phone">iOS 27 (OneiOS) is mainly tested and working on the Galaxy S24 Ultra 5G (SM-S928B). On this phone it may be unstable, miss pieces, or not come back to One UI; Samsung devices are the ones it is written for.</string>
+-    <string name="oneios_not_this_phone_ack">I understand that iOS 27 (OneiOS) is mainly tested and working on the Galaxy S24 Ultra 5G (SM-S928B); on this phone it may be unstable, miss pieces, or not come back to One UI, and that One UI stops while it runs.</string>
+-    <string name="oneios_ack">I understand that iOS 27 (OneiOS) is experimental, has never been tested on a phone like this one, and that One UI stops while it runs.</string>
++    <string name="oneios_not_this_phone_title">OneiOS is mainly for the Galaxy S24 Ultra</string>
++    <string name="oneios_not_this_phone">OneiOS is mainly tested and working on the Galaxy S24 Ultra 5G (SM-S928B). On this phone it may be unstable, miss pieces, or not come back to One UI; Samsung devices are the ones it is written for.</string>
++    <string name="oneios_not_this_phone_ack">I understand that OneiOS is mainly tested and working on the Galaxy S24 Ultra 5G (SM-S928B); on this phone it may be unstable, miss pieces, or not come back to One UI, and that One UI stops while it runs.</string>
++    <string name="oneios_ack">I understand that this OneiOS image is experimental and may not have been tested on this phone, and that One UI stops while it runs.</string>
+     <string name="oneios_ack_read">I have read how to get back to One UI: Volume Up + Volume Down, both for 3 seconds.</string>
+ 
+-    <!-- Set up iOS 27: the steps, as Setting up shows an Android system's. -->
+-    <string name="oneios_setup_title">Set up iOS 27</string>
++    <!-- Set up OneiOS: the steps, as Setting up shows an Android system's. -->
++    <string name="oneios_setup_title">Set up OneiOS</string>
+     <string name="oneios_step_runtime">Get the OneiOS runtime</string>
+     <string name="oneios_step_runtime_about">Holds xnuhost, the program that runs iOS. From OneiOS\'s releases, or your own file.</string>
+     <string name="oneios_step_image">Make your iOS image</string>
+-    <string name="oneios_step_image_about">This phone downloads iOS from Apple (iOS 27.0.1, tested, or iOS 27.2.1, not booted yet) and builds the image itself. Or use an image set you already have.</string>
++    <string name="oneios_step_image_about">On the S24 Ultra, make iOS 16.5 first or choose an iOS 27 fallback. On the A56, make iOS 16.5. The phone builds the image from Apple\'s files.</string>
+     <string name="oneios_step_data">iOS\'s own data</string>
+     <string name="oneios_step_data_about">Made at the first switch and kept after that</string>
+     <string name="oneios_step_ready">Last check before the switch</string>
+     <string name="oneios_step_ready_about">Root checks the staged files and the phone; the switch hashes every file again first</string>
+     <string name="oneios_steps_done">%1$d of %2$d steps done</string>
+     <string name="oneios_setup_then">Then: %1$s</string>
+-    <string name="oneios_setup_then_switch">Then you can switch to iOS 27.</string>
++    <string name="oneios_setup_then_switch">Then you can switch to iOS.</string>
+     <string name="oneios_setup_ready_next">Continue to switch. You read how to get back to One UI first.</string>
+     <string name="oneios_downloading">Downloading</string>
+     <string name="oneios_importing">Importing</string>
+@@ -45,25 +45,25 @@
+     <string name="oneios_runtime_choice_file_line">A oneios-runtime-…-arm64.tar.zst you built or downloaded</string>
+     <string name="oneios_image_choose_title">Where should the iOS image come from?</string>
+     <string name="oneios_image_choice_make">Make it on this phone</string>
+-    <string name="oneios_image_choice_make_line">Recommended. Downloads iOS from Apple (about 11 GB, once: iOS 27.0.1 or 27.2.1, your pick) and builds the image here. No PC.</string>
++    <string name="oneios_image_choice_make_line">Downloads iOS from Apple and builds the image here. On the S24 Ultra, iOS 16.5 is first, with iOS 27 as fallback.</string>
+     <string name="oneios_image_choice_file">Use an image set I have</string>
+     <string name="oneios_image_choice_file_line">An image set (.tar.zst) you built before. It is checked against its manifest.json.</string>
+-    <!-- The steps on iOS 27's page while something is missing (OneiosActivity.stepper). -->
+-    <string name="oneios_steps_title">Set up iOS 27: what is left</string>
++    <!-- The steps on OneiOS's page while something is missing (OneiosActivity.stepper). -->
++    <string name="oneios_steps_title">Set up OneiOS: what is left</string>
+     <string name="oneios_step_numbered">%1$d. %2$s</string>
+     <string name="oneios_step_tap">Tap to do this step</string>
+     <!-- oneios-tool in the app (OneiosToolActivity, OneiosToolJob): what the tool sends, shown as it comes. -->
+     <string name="oneios_make_image">Make iOS image</string>
+-    <string name="oneios_make_image_line">On this phone, from Apple\'s own files (about 11 GB to download, once)</string>
++    <string name="oneios_make_image_line">From Apple\'s own files; download size depends on which iOS build you choose</string>
+     <string name="oneios_make_image_confirm">This phone downloads iOS %3$s from Apple (about %1$s, once) and builds the iOS image itself. It needs about %2$s free while it builds; afterwards the image keeps about half of that. If the OneiOS runtime here is too old for it, the newest one comes first.\n\nUse Wi-Fi and keep the phone charging. You can pause, stop and go on later: what it downloaded stays.</string>
+     <string name="oneios_make_image_free">This phone has %1$s free.</string>
+     <string name="oneios_make_image_free_short">This phone has %1$s free, less than that. Free up space in One UI first; the build checks the exact room before it downloads anything.</string>
+     <string name="oneios_make_image_start">Make it</string>
+     <string name="oneios_make_image_pick_title">Which iOS should this phone make?</string>
+     <string name="oneios_make_image_pick_line">About %1$s to download, once · needs about %2$s free</string>
+-    <string name="oneios_make_image_not_booted">This build has not been booted on a phone yet: iOS 27.0.1 (24A446) is the tested one. If it does not start, make iOS 27.0.1 instead.</string>
++    <string name="oneios_make_image_not_booted">This image build has not been boot-tested in this branch. It may fail to start; keep the One UI return controls available.</string>
+     <string name="oneios_make_image_of">Make iOS %1$s</string>
+-    <string name="oneios_make_image_staged">Switch from iOS 27\'s page</string>
++    <string name="oneios_make_image_staged">Switch from OneiOS\'s page</string>
+     <string name="oneios_tool_sums">Check every file</string>
+     <string name="oneios_tool_sums_line">The runtime and the image set hashed again, every file, on all cores</string>
+     <string name="oneios_tool_cpu">CPU, clocks and threads</string>
+@@ -122,7 +122,7 @@
+     <string name="oneios_running_finish_kernel">Activating the phone-built kernel</string>
+     <string name="oneios_running_restore_kernel">Restoring the kept kernel set</string>
+ 
+-    <!-- iOS 27's page, as a system's page. -->
++    <!-- OneiOS's page, as a system's page. -->
+     <string name="oneios_state_title">On this phone</string>
+     <string name="oneios_runtime">OneiOS runtime</string>
+     <string name="oneios_image">iOS image set</string>
+@@ -199,8 +199,8 @@
+     <string name="oneios_tag_title">Which release?</string>
+     <string name="oneios_tag_hint">Release tag (empty: the latest)</string>
+ 
+-    <!-- Switch to iOS 27? (the Switch confirm) and the switching screen. -->
+-    <string name="oneios_switch_message">One UI closes and iOS 27 starts on this phone\'s own kernel. Nothing of One UI\'s is erased.</string>
++    <!-- Switch to iOS? (the Switch confirm) and the switching screen. -->
++    <string name="oneios_switch_message">One UI closes and the selected iOS image starts on this phone\'s own kernel. Nothing of One UI\'s is erased.</string>
+     <string name="oneios_switch_note_runtime">Runtime: %1$s</string>
+     <string name="oneios_switch_note_image">Image set: %1$s</string>
+     <string name="oneios_ways_four">Four ways back to One UI</string>
+@@ -218,7 +218,7 @@
+     <string name="oneios_logs_line">Read what the last iOS sessions logged: how far the boot got, a kernel panic, processes that died, how the session ended</string>
+     <string name="oneios_logs_about">What xnuhost, the switch and the return wrote during the last iOS sessions. Root only reads them. A log shared from here is the log as it is on the phone; Collect logs in Last session is the way that removes personal data.</string>
+     <string name="oneios_logs_none">No iOS session has logged anything yet</string>
+-    <string name="oneios_logs_none_line">A session\'s log appears here after the first switch to iOS 27.</string>
++    <string name="oneios_logs_none_line">A session\'s log appears here after the first switch to iOS.</string>
+     <string name="oneios_logs_no_stage">OneiOS is not set up on this phone, so there are no session logs.</string>
+     <string name="oneios_logs_sessions">Sessions</string>
+     <string name="oneios_logs_current">This session (still open)</string>
+diff --git a/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/Oneios.kt b/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/Oneios.kt
+index cce2435..cd7ab7f 100644
+--- a/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/Oneios.kt
++++ b/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/Oneios.kt
+@@ -7,7 +7,7 @@ import java.security.MessageDigest
+ import java.util.Locale
+ 
+ /**
+- * The iOS 27 (OneiOS) system (docs/oneios.md): not an Android guest, so it is
++ * The OneiOS system (docs/oneios.md): not an Android guest, so it is
+  * not an [ImageRef]. Three things differ:
+  *  - its runtime (xnuhost, the program that runs iOS on One UI's kernel) is a
+  *    package from OneiOS's GitHub releases ([OneiosReleases]);
+@@ -21,14 +21,13 @@ object OneiosSystem {
+     const val ID = "oneios-ios27"
+ 
+     /** The system's name on its card and in every text about it. */
+-    const val NAME = "iOS 27 (OneiOS)"
+-    const val SHORT_NAME = "iOS 27"
++    const val NAME = "OneiOS"
++    const val SHORT_NAME = "iOS"
+ 
+     /**
+-     * The name of what the staged image set starts: "iOS 16.5" for the A56's 20F66 set, the whole version of an iOS 27
+-     * set ("iOS 27.0.1", "iOS 27.2.1": two builds can be staged, OneOS 2026-11-25), [SHORT_NAME] when no set is
+-     * staged. The page title, the Switch button and the switching line use it: on the A56 they all said "iOS 27" over
+-     * an iOS 16.5 set (OneiOS issue 73, 2026-11-24).
++     * The name of what the staged image set starts: "iOS 16.5" for build 20F66 or the whole version of an iOS 27 set
++     * ("iOS 27.0.1", "iOS 27.2.1"). [SHORT_NAME] when no set is staged. The page title, Switch button and switching
++     * line use it, so the app names the selected image rather than hard-coding a version.
+      */
+     fun shortName(imageVersion: String?): String {
+         val v = imageVersion?.trim()?.takeIf { it.isNotEmpty() } ?: return SHORT_NAME
+@@ -40,10 +39,14 @@ object OneiosSystem {
+     fun isIos27(imageVersion: String?): Boolean =
+         imageVersion?.trim()?.takeIf { it.isNotEmpty() }?.substringBefore('.')?.let { it == "27" } ?: true
+ 
+-    /** [shortName] with "(OneiOS)", as [NAME]. */
+-    fun name(imageVersion: String?): String = "${shortName(imageVersion)} (OneiOS)"
++    /** [shortName] with "(OneiOS)" for a staged image, or the generic system name when none is staged. */
++    fun name(imageVersion: String?): String {
++        val version = imageVersion?.trim()?.takeIf { it.isNotEmpty() } ?: return NAME
++        if (!Regex("^[0-9]{1,3}(\\.[0-9]{1,3}){0,3}$").matches(version)) return NAME
++        return "${shortName(version)} (OneiOS)"
++    }
+ 
+-    const val BLURB = "Apple's iOS 27 on this phone's own kernel, run by OneiOS's xnuhost. " +
++    const val BLURB = "Apple's iOS on this phone's own kernel, run by OneiOS's xnuhost. " +
+         "You build the image yourself from Apple's firmware; OneOS never downloads it."
+ 
+     /** Root's stage for it: separate from the Android guests' ([Images.STAGE_NAME]'s folder). */
+@@ -76,7 +79,7 @@ object OneiosSystem {
+     const val GATE_ID = "gate-oneios"
+ 
+     /** The not-this-phone warning's tick (OneiosSwitchConfirm's box; the owner's 2026-11-16 decision). */
+-    const val NOT_THIS_PHONE_ACK = "I understand that iOS 27 (OneiOS) is mainly tested and working on the Galaxy S24 Ultra 5G " +
++    const val NOT_THIS_PHONE_ACK = "I understand that OneiOS is mainly tested and working on the Galaxy S24 Ultra 5G " +
+         "(SM-S928B); on this phone it may be unstable, miss pieces, or not come back to One UI, and that One UI stops while it runs."
+ 
+     /**
+@@ -94,7 +97,7 @@ object OneiosSystem {
+     )
+ 
+     /** What the experimental tick says. */
+-    const val ACK = "I understand that iOS 27 (OneiOS) is experimental, has never been tested on a phone like this one, " +
++    const val ACK = "I understand that this OneiOS image is experimental and may not have been tested on this phone, " +
+         "and that One UI stops while it runs. Volume Up + Volume Down for 3 seconds brings One UI back."
+ 
+     /**
+diff --git a/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/OneiosPlain.kt b/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/OneiosPlain.kt
+index 1d4bf86..366ffea 100644
+--- a/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/OneiosPlain.kt
++++ b/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/OneiosPlain.kt
+@@ -1,7 +1,7 @@
+ package com.fahadali.oneos.core.model
+ 
+ /**
+- * What an iOS 27 (OneiOS) screen offers to fix a refusal (docs/oneios.md, "In the app"), as [FixAction]
++ * What the OneiOS screen offers to fix a refusal (docs/oneios.md, "In the app"), as [FixAction]
+  * is the Android guests'. The app runs it (ui/OneiosActions.kt); none of them changes what root checks.
+  */
+ enum class OneiosFix {
+@@ -152,7 +152,7 @@ object OneiosPlain {
+ 
+             // The app itself, or its root script on the way to root.
+             "not the pinned one" in p || "not the pinned ones" in p -> m(
+-                "This copy of OneOS is damaged", "Reinstall OneOS, then open iOS 27 again.", OneiosFix.NONE, OneiosPart.OTHER,
++                "This copy of OneOS is damaged", "Reinstall OneOS, then open OneiOS again.", OneiosFix.NONE, OneiosPart.OTHER,
+             )
+             "root script did not arrive intact" in p -> m(
+                 "The root script didn't arrive", "OneOS's root script reached root damaged. Check again; if it stays, reinstall OneOS.",
+@@ -164,8 +164,8 @@ object OneiosPlain {
+ 
+             // The phone and root (the preflight's first checks).
+             "galaxy s24 ultra" in p -> m(
+-                "iOS 27 isn't for this phone",
+-                "It runs on the Galaxy S24 Ultra (SM-S928), and on the Galaxy A56 (SM-A566) with iOS 16.5 (untested there).",
++                "OneiOS isn't set up for this phone",
++                "OneiOS is made for the Galaxy S24 Ultra and has an experimental iOS 16.5 path there; other phones may be unstable.",
+                 OneiosFix.NONE, OneiosPart.PHONE,
+             )
+             "not running as root" in p || "su could not be started" in p || p == "root did not answer in time" || p == "no answer from root" ||
+@@ -189,7 +189,7 @@ object OneiosPlain {
+                 OneiosFix.GET_RUNTIME, OneiosPart.RUNTIME, Level.INFO,
+             )
+             "no ios image set is staged" in p -> m(
+-                "Make your iOS image", "This phone downloads iOS 27.0.1 from Apple and builds it itself. Or choose an image set you have.",
++                "Make your iOS image", "Build an iOS image from Apple's files, or choose an image set you already have.",
+                 OneiosFix.IMPORT_IMAGE, OneiosPart.IMAGE, Level.INFO,
+             )
+             ("oneios_switch.sh" in p || "oneios_return.sh" in p) && ("missing" in p || "not staged" in p || "not root's" in p) -> m(
+diff --git a/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/OneiosTool.kt b/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/OneiosTool.kt
+index 86a669c..1025ddd 100644
+--- a/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/OneiosTool.kt
++++ b/app-android/core/model/src/main/kotlin/com/fahadali/oneos/core/model/OneiosTool.kt
+@@ -113,28 +113,36 @@ object OneiosTool {
+      * members from Apple itself (by range requests, resumable), decrypts the AEA images (the key from Apple's key
+      * service), copies `/private/var` with its own APFS reader, runs the root tweaks, packs the seed, decodes Apple's
+      * kernelcache and prelinks the staged runtime's `kernel/xnu.macho` with the pairing files in `kb/`. `profile`: the
+-     * runtime's [IPSW_PROFILE] by default, as the kernel update's `fetch` sends it; the Galaxy A56's
+-     * [OneiosImageChoice.IOS_16_5_A56] and iOS 27.2.1's [OneiosImageChoice.IOS_27_2] name their own. A released runtime
++     * runtime's [IPSW_PROFILE] by default, as the kernel update's `fetch` sends it; iOS 16.5's
++     * [OneiosImageChoice.IOS_16_5] and iOS 27.2.1's [OneiosImageChoice.IOS_27_2] name their own. A released runtime
+      * packs every profile of OneiOS's `profiles/` (v0.1.16: five, two of them host profiles), and a tool up to v0.1.16
+      * refuses a request without `profile` there (`usage`, "holds 5 profiles: give \"profile\"", OneiOS issue 75: every
+      * Make iOS image stopped with "OneOS and the runtime don't agree"). The keys it takes from the stage when not sent:
+-     * `xnu` (`runtime.json`'s `kernel.path`), `kb` (`<stage>/kb`), `tweaks` (true): iOS 27.0.1 and the A56 send none
+-     * of them, as before; iOS 27.2.1 sends [xnu] (the runtime's `kernels[]` path of 24B156, stage-relative under
+-     * `runtime/`) and [kb] (`kb-24B156`). `resume`: a stop, a lost network or an ended app keep the fetch's parts for
+-     * the next run (the tool's default too; sent so that it does not depend on one).
++     * `xnu` (`runtime.json`'s `kernel.path`), `kb` (`<stage>/kb`), `tweaks` (true): iOS 27.0.1 and iOS 16.5 send none
++     * of them; iOS 27.2.1 sends [xnu] (the runtime's `kernels[]` path of 24B156, stage-relative under `runtime/`)
++     * and [kb] (`kb-24B156`). `runtime_plugins` is omitted by default; on the S24 Ultra's experimental 20F66 build it
++     * is explicitly false so the make-image tool leaves out every runtime plug-in, including the A56-only GPU sidecar.
++     * `resume`: a stop, a lost network or an ended app keep the fetch's parts for the next run (the tool's default too;
++     * sent so that it does not depend on one).
+      */
+-    fun makeImageRequest(stage: String, profile: String = IPSW_PROFILE, xnu: String? = null, kb: String? = null): Pair<String, Map<String, Any?>> =
+-        Cmd.MAKE_IMAGE to (
+-            mapOf(
+-                "profile" to "$stage/$profile",
+-                "indir" to "$stage/$MAKE_WORK/inputs",
+-                "out" to "$stage/image.new",
+-                "sums_list" to "$stage/image.new.sha256",
+-                "ids_list" to "$stage/image.new.ids",
+-                "work" to "$stage/$MAKE_WORK",
+-                "resume" to true,
+-            ) + listOfNotNull(xnu?.let { "xnu" to "$stage/runtime/$it" }, kb?.let { "kb" to "$stage/$it" })
+-        )
++    fun makeImageRequest(
++        stage: String,
++        profile: String = IPSW_PROFILE,
++        xnu: String? = null,
++        kb: String? = null,
++        runtimePlugins: Boolean = true,
++    ): Pair<String, Map<String, Any?>> {
++        val keys = mapOf(
++            "profile" to "$stage/$profile",
++            "indir" to "$stage/$MAKE_WORK/inputs",
++            "out" to "$stage/image.new",
++            "sums_list" to "$stage/image.new.sha256",
++            "ids_list" to "$stage/image.new.ids",
++            "work" to "$stage/$MAKE_WORK",
++            "resume" to true,
++        ) + listOfNotNull(xnu?.let { "xnu" to "$stage/runtime/$it" }, kb?.let { "kb" to "$stage/$it" })
++        return Cmd.MAKE_IMAGE to if (runtimePlugins) keys else keys + ("runtime_plugins" to false)
++    }
+ 
+     /**
+      * What Make iOS image downloads from Apple for iOS 27.0.1 (24A446), iPhone18,2: the members the runtime's profile
+@@ -329,7 +337,7 @@ object OneiosTool {
+ }
+ 
+ /**
+- * Which iOS image a phone makes with Make iOS image (docs/oneios.md, "Make iOS image" and "Galaxy A56"): the runtime's
++ * Which iOS image a phone makes with Make iOS image (docs/oneios.md, "Make iOS image" and "iOS 16.5 on the S24 Ultra"): the runtime's
+  * IPSW profile ([profile], stage-relative, as [OneiosTool.makeImageRequest] sends it), the iOS [version] and [build]
+  * it gives, what it downloads from Apple ([downloadBytes], the sum of the profile's members) and about the free room
+  * it needs at its peak ([roomBytes]), for the screen before it starts. A phone offers one or more ([choicesOf]): the
+@@ -342,11 +350,11 @@ data class OneiosImageChoice(
+     val downloadBytes: Long,
+     val roomBytes: Long,
+ ) {
+-    /** The Apple build whose kexts this set's kernel.kc is prelinked with ([kernelBuildOf]): 24A446 for the A56's 20F66. */
++    /** The Apple build whose kexts this set's kernel.kc is prelinked with ([kernelBuildOf]): 24A446 for 20F66. */
+     val kernelBuild: String get() = kernelBuildOf(build)
+ 
+     /**
+-     * The profile has no kernelcache member (the A56's iOS 16.5 one): the set's kernel.kc is OneiOS's XNU prelinked
++     * The profile has no kernelcache member (iOS 16.5): the set's kernel.kc is OneiOS's XNU prelinked
+      * with the iPhone18,2 24A446 kexts, so `make-image` needs Apple's 24A446 kernelcache in `kb/kernelcache.macho`
+      * first (it refuses `usage`, "no kernelcache member to decode, and no kernelcache given", without it). That is
+      * the one Update the kernel fetches ([OneiosTool.kernelcacheFetchRequest] with [OneiosTool.IPSW_PROFILE]). iOS
+@@ -359,14 +367,14 @@ data class OneiosImageChoice(
+ 
+     /**
+      * The tool's own defaults make this set (`xnu` = `runtime.json`'s `kernel.path`, `kb` = `<stage>/kb`): iOS 27.0.1
+-     * and the A56's 16.5 (both the 24A446 kexts). iOS 27.2.1 names its kernel and its `kb-24B156` in the request.
++     * and iOS 16.5 (both use the 24A446 kexts). iOS 27.2.1 names its kernel and its `kb-24B156` in the request.
+      */
+     val usesDefaultKernel: Boolean get() = kernelBuild == IOS_27.build
+ 
+     /** "iOS 27.2.1 (24B156)". */
+     val title: String get() = "iOS $version ($build)"
+ 
+-    /** The list's line: [title] and what is known of it, "iOS 27.0.1 (24A446), tested" first. */
++    /** The list's line: [title] and what is known of this build on the current device. */
+     val label: String get() = NOTES[build]?.let { "$title, $it" } ?: title
+ 
+     companion object {
+@@ -388,25 +396,27 @@ data class OneiosImageChoice(
+         )
+ 
+         /**
+-         * iOS 16.5 (20F66) from Apple's iPhone X IPSW, for the Galaxy A56 (OneiOS issue 73; the runtime's
+-         * `lib/profiles/ios-16.5-a56.toml`): its 11 members are 5,825,842,914 bytes, its `need_gib` is 20 (the
+-         * members and the OS image's raw APFS image), and with the seed's tree and tar, kernel.kc and the hash lists
+-         * the peak is about 24 GiB. Untested on an A56.
++         * iOS 16.5 (20F66) from Apple's iPhone X IPSW, pinned in the runtime's `lib/profiles/ios-16.5-a56.toml`.
++         * This same source image is used by the A56 path and the experimental S24 Ultra path. Its 11 members are
++         * 5,825,842,914 bytes; the profile's `need_gib` is 20 and peak room is about 24 GiB. Not boot-tested on S24.
+          */
+-        val IOS_16_5_A56 = OneiosImageChoice(
++        val IOS_16_5 = OneiosImageChoice(
+             "runtime/lib/profiles/ios-16.5-a56.toml", "16.5", "20F66", 5_825_842_914L, 24L shl 30,
+         )
+ 
++        /** Source-compatible name for the original A56 choice. */
++        val IOS_16_5_A56 = IOS_16_5
++
+         /**
+-         * The iOS 27 builds not booted on a phone yet: offered after the tested one, with "new: not booted yet" and a
+-         * line in the confirm. Moves out once a phone boot of it passes (then the order and the notes change; nothing
+-         * else blocks it).
++         * Image builds that have not been boot-tested in this tree: each gets a note in the picker and a warning before
++         * the build starts. Remove a build once a phone boot of that build passes.
+          */
+-        val NOT_BOOTED: Set<String> = setOf(IOS_27_2.build)
++        val NOT_BOOTED: Set<String> = setOf(IOS_16_5.build, IOS_27_2.build)
+ 
+         /** What the list says of each build beside its name ([label]): 27.0.1 stays the tested one until 27.2.1 boots. */
+         val NOTES: Map<String, String> = mapOf(
+             IOS_27.build to "tested",
++            IOS_16_5.build to "new: not booted on this device",
+             IOS_27_2.build to "new: not booted yet",
+         )
+ 
+@@ -414,13 +424,18 @@ data class OneiosImageChoice(
+         val IOS_27_BUILDS: List<OneiosImageChoice> = listOf(IOS_27, IOS_27_2)
+ 
+         /**
+-         * What Make iOS image offers on a phone, the recommended one first: the Galaxy A56 only iOS 16.5; every other
+-         * phone (or none known) iOS 27.0.1 (24A446), tested, then iOS 27.2.1 (24B156), not booted yet.
++         * What Make iOS image offers on a phone, the recommended one first: the S24 Ultra tries iOS 16.5 (20F66),
++         * with both iOS 27 builds retained as fallbacks; the A56 keeps its existing iOS 16.5-only path. Other phones
++         * (or none known) keep the iOS 27 choices.
+          */
+         fun choicesOf(profile: PhoneProfile?): List<OneiosImageChoice> =
+-            if (profile?.id == Profiles.ID_A56) listOf(IOS_16_5_A56) else IOS_27_BUILDS
++            when (profile?.id) {
++                Profiles.ID_A56 -> listOf(IOS_16_5)
++                Profiles.ID_S_ULTRA_8650 -> listOf(IOS_16_5) + IOS_27_BUILDS
++                else -> IOS_27_BUILDS
++            }
+ 
+-        /** The phone's recommended choice ([choicesOf]'s first): iOS 16.5 on the A56, iOS 27.0.1 everywhere else, as before. */
++        /** The phone's recommended choice ([choicesOf]'s first): iOS 16.5 on the S24 Ultra and A56. */
+         fun of(profile: PhoneProfile?): OneiosImageChoice = choicesOf(profile).first()
+ 
+         /** The phone's choice of [build] (the user's pick); the recommended one when it offers no such build. */
+@@ -429,11 +444,11 @@ data class OneiosImageChoice(
+ 
+         /**
+          * The Apple build whose kexts a staged image set's kernel.kc is prelinked with: the image's own build, except
+-         * the A56's iOS 16.5 (20F66), whose kernel.kc is OneiOS's XNU with the iPhone18,2 24A446 kexts
++         * iOS 16.5 (20F66), whose kernel.kc is OneiOS's XNU with the iPhone18,2 24A446 kexts
+          * (`ios-16.5-a56.toml`; [needsKernelcache]). Update the kernel compares this, not the image's build, with the
+-         * prelink inputs' build: on the A56 it refused "the staged image set is 20F66" (OneiOS issue 73, 2026-11-24).
++         * prelink inputs' build: without this mapping it refused "the staged image set is 20F66" (OneiOS issue 73, 2026-11-24).
+          */
+-        fun kernelBuildOf(imageBuild: String): String = if (imageBuild == IOS_16_5_A56.build) IOS_27.build else imageBuild
++        fun kernelBuildOf(imageBuild: String): String = if (imageBuild == IOS_16_5.build) IOS_27.build else imageBuild
+ 
+         private val BUILD = Regex("^[0-9A-Z]{3,20}$")
+ 
+@@ -449,7 +464,7 @@ data class OneiosImageChoice(
+         fun ipswProfileOf(kernelBuild: String): String? = IOS_27_BUILDS.firstOrNull { it.build == kernelBuild }?.profile
+ 
+         /** The choice that makes [build] ("iOS 27.2.1 (24B156)" for 24B156); null for a build the app does not make. */
+-        fun ofBuild(build: String?): OneiosImageChoice? = (IOS_27_BUILDS + IOS_16_5_A56).firstOrNull { it.build == build }
++        fun ofBuild(build: String?): OneiosImageChoice? = (IOS_27_BUILDS + IOS_16_5).firstOrNull { it.build == build }
+     }
+ }
+ 
+diff --git a/app-android/core/model/src/test/kotlin/com/fahadali/oneos/core/model/OneiosPlainTest.kt b/app-android/core/model/src/test/kotlin/com/fahadali/oneos/core/model/OneiosPlainTest.kt
+index 2d348e2..494a268 100644
+--- a/app-android/core/model/src/test/kotlin/com/fahadali/oneos/core/model/OneiosPlainTest.kt
++++ b/app-android/core/model/src/test/kotlin/com/fahadali/oneos/core/model/OneiosPlainTest.kt
+@@ -57,9 +57,9 @@ class OneiosPlainTest {
+         // This phone and root, before the stage.
+         assertEquals(OneiosPart.PHONE, of("not running as root").part)
+         assertEquals(OneiosPart.PHONE, of("iOS runs on the Galaxy S24 Ultra (SM-S928) only; this phone is SM-S918B").part)
+-        // (an older switch's refusal) Its words name both phones it runs on now: the A56 with iOS 16.5, untested there.
++        // (an older switch's refusal) Unsupported phones are told the S24's iOS 16.5 path is experimental.
+         assertEquals(
+-            "It runs on the Galaxy S24 Ultra (SM-S928), and on the Galaxy A56 (SM-A566) with iOS 16.5 (untested there).",
++            "OneiOS is made for the Galaxy S24 Ultra and has an experimental iOS 16.5 path there; other phones may be unstable.",
+             of("iOS runs on the Galaxy S24 Ultra (SM-S928) only; this phone is SM-S918B").line,
+         )
+         // Root's busybox line comes before the preflight could run; the preflight's own (with the paths) after the stage.
+diff --git a/app-android/core/model/src/test/kotlin/com/fahadali/oneos/core/model/OneiosTest.kt b/app-android/core/model/src/test/kotlin/com/fahadali/oneos/core/model/OneiosTest.kt
+index 0ecc109..5d975c9 100644
+--- a/app-android/core/model/src/test/kotlin/com/fahadali/oneos/core/model/OneiosTest.kt
++++ b/app-android/core/model/src/test/kotlin/com/fahadali/oneos/core/model/OneiosTest.kt
+@@ -158,16 +158,20 @@ class OneiosTest {
+     }
+ 
+     /**
+-     * Which image a phone makes (docs/oneios.md, "Galaxy A56"): the A56 iOS 16.5 (20F66) from the runtime's
+-     * ios-16.5-a56.toml, with its download and room; every other phone, and an unknown one, exactly today's iOS 27
+-     * values. Only the A56's needs Apple's 24A446 kernelcache first.
++     * Which image a phone makes (docs/oneios.md, "iOS 16.5 on the S24 Ultra"): the A56 keeps its iOS 16.5-only
++     * path; the S24 Ultra gets iOS 16.5 first, then the existing iOS 27 choices as fallback; other phones and an
++     * unknown one keep today's iOS 27 defaults. The 20F66 image needs Apple's 24A446 kernelcache first.
+      */
+     @Test
+     fun theA56MakesIos165AndEveryOtherPhoneIos27() {
+         val a56 = OneiosImageChoice.of(Profiles.resolve("SM-A566B", "a56x", "s5e8855").profile)
+-        assertEquals(OneiosImageChoice("runtime/lib/profiles/ios-16.5-a56.toml", "16.5", "20F66", 5_825_842_914L, 24L shl 30), a56)
++        assertEquals(OneiosImageChoice.IOS_16_5, a56)
+         assertTrue(a56.needsKernelcache)
+-        for (p in Profiles.BUILT_IN.filter { it.id != Profiles.ID_A56 } + listOf(null)) {
++        val s24 = Profiles.S_ULTRA_8650
++        assertEquals(listOf(OneiosImageChoice.IOS_16_5, OneiosImageChoice.IOS_27, OneiosImageChoice.IOS_27_2), OneiosImageChoice.choicesOf(s24))
++        assertEquals(OneiosImageChoice.IOS_16_5, OneiosImageChoice.of(s24))
++        assertEquals(OneiosImageChoice.IOS_27, OneiosImageChoice.of(s24, "24A446"))
++        for (p in Profiles.BUILT_IN.filter { it.id != Profiles.ID_A56 && it.id != Profiles.ID_S_ULTRA_8650 } + listOf(null)) {
+             val c = OneiosImageChoice.of(p)
+             assertEquals(p?.id, OneiosImageChoice.IOS_27, c)
+             assertFalse(p?.id, c.needsKernelcache)
+@@ -176,10 +180,14 @@ class OneiosTest {
+             OneiosImageChoice(OneiosTool.IPSW_PROFILE, "27.0.1", "24A446", OneiosTool.MAKE_IMAGE_DOWNLOAD_BYTES, OneiosTool.MAKE_IMAGE_ROOM_BYTES),
+             OneiosImageChoice.IOS_27,
+         )
+-        // The request names the A56's profile; the S24 Ultra's is byte for byte the default one.
++        // Both phones use the pinned iPhone X source profile; unknown phones keep the existing default request.
+         val s = OneiosSystem.STAGE
+         assertEquals("$s/runtime/lib/profiles/ios-16.5-a56.toml", OneiosTool.makeImageRequest(s, a56.profile).second["profile"])
+-        assertEquals(OneiosTool.makeImageRequest(s), OneiosTool.makeImageRequest(s, OneiosImageChoice.of(Profiles.S_ULTRA_8650).profile))
++        assertEquals("$s/runtime/lib/profiles/ios-16.5-a56.toml", OneiosTool.makeImageRequest(s, s24.let { OneiosImageChoice.of(it).profile }).second["profile"])
++        val s24Request = OneiosTool.makeImageRequest(s, OneiosImageChoice.IOS_16_5.profile, runtimePlugins = false).second
++        assertEquals(false, s24Request["runtime_plugins"])
++        assertFalse("runtime_plugins" in OneiosTool.makeImageRequest(s).second)
++        assertEquals(OneiosTool.makeImageRequest(s), OneiosTool.makeImageRequest(s, OneiosImageChoice.IOS_27.profile))
+         assertEquals(
+             OneiosTool.makeImageRequest(s).second - "profile",
+             OneiosTool.makeImageRequest(s, a56.profile).second - "profile",
+@@ -696,8 +704,8 @@ class OneiosTest {
+     /** The page, the Switch button and the switching line name the staged set's iOS: "iOS 16.5" on the A56 (issue 73), the whole iOS 27 version. */
+     @Test
+     fun theNameFollowsTheStagedSet() {
+-        assertEquals("iOS 27", OneiosSystem.shortName(null))
+-        assertEquals("iOS 27", OneiosSystem.shortName(""))
++        assertEquals("iOS", OneiosSystem.shortName(null))
++        assertEquals("iOS", OneiosSystem.shortName(""))
+         assertEquals("iOS 27.0.1", OneiosSystem.shortName("27.0.1"))
+         assertEquals("iOS 27.2.1", OneiosSystem.shortName("27.2.1"))
+         assertEquals("iOS 16.5", OneiosSystem.shortName("16.5"))
+@@ -714,14 +722,12 @@ class OneiosTest {
+     }
+ 
+     /**
+-     * Make iOS image offers both iOS 27 builds on every phone but the A56 (OneOS, 2026-11-25): iOS 27.0.1 (24A446),
+-     * tested, first and the default; iOS 27.2.1 (24B156), not booted yet, second; each with the download and room its
+-     * profile gives (profiles/ios-27.2.1-iPhone18,2.toml: 13 members, 11,718,249,424 bytes = 10.91 GiB, need_gib 32;
+-     * 24A446's 10.59 GiB and need_gib 30). The A56 makes only iOS 16.5. The pick is what make-image builds.
++     * The iOS image choices: S24 Ultra iOS 16.5 first with the existing iOS 27 builds as fallback, A56 iOS 16.5 only,
++     * and iOS 27 choices on other phones (OneOS 2026-11-27). The pick is what make-image builds.
+      */
+     @Test
+     fun everyIos27PhoneOffersBothBuildsTheTestedOneFirst() {
+-        for (p in Profiles.BUILT_IN.filter { it.id != Profiles.ID_A56 } + listOf(null)) {
++        for (p in Profiles.BUILT_IN.filter { it.id != Profiles.ID_A56 && it.id != Profiles.ID_S_ULTRA_8650 } + listOf(null)) {
+             assertEquals(p?.id, listOf(OneiosImageChoice.IOS_27, OneiosImageChoice.IOS_27_2), OneiosImageChoice.choicesOf(p))
+             assertEquals(p?.id, OneiosImageChoice.IOS_27, OneiosImageChoice.of(p))
+             assertEquals(p?.id, OneiosImageChoice.IOS_27_2, OneiosImageChoice.of(p, "24B156"))
+@@ -733,8 +739,12 @@ class OneiosTest {
+         assertEquals(OneiosImageChoice.IOS_16_5_A56, OneiosImageChoice.of(a56, "24B156"))
+         assertEquals("iOS 27.0.1 (24A446), tested", OneiosImageChoice.IOS_27.label)
+         assertEquals("iOS 27.2.1 (24B156), new: not booted yet", OneiosImageChoice.IOS_27_2.label)
+-        assertEquals("iOS 16.5 (20F66)", OneiosImageChoice.IOS_16_5_A56.label)
+-        assertEquals(setOf("24B156"), OneiosImageChoice.NOT_BOOTED)
++        assertEquals("iOS 16.5 (20F66), new: not booted on this device", OneiosImageChoice.IOS_16_5.label)
++        assertEquals(setOf("20F66", "24B156"), OneiosImageChoice.NOT_BOOTED)
++        val s24 = Profiles.S_ULTRA_8650
++        assertEquals(listOf(OneiosImageChoice.IOS_16_5, OneiosImageChoice.IOS_27, OneiosImageChoice.IOS_27_2), OneiosImageChoice.choicesOf(s24))
++        assertEquals(OneiosImageChoice.IOS_16_5, OneiosImageChoice.of(s24))
++        assertEquals(OneiosImageChoice.IOS_27_2, OneiosImageChoice.of(s24, "24B156"))
+         val r = OneiosImageChoice.IOS_27_2
+         assertEquals("runtime/lib/profiles/ios-27.2.1-iPhone18-2.toml", r.profile)
+         assertEquals("27.2.1" to "24B156", r.version to r.build)
+@@ -746,7 +756,7 @@ class OneiosTest {
+         assertFalse(r.needsKernelcache)
+         assertFalse(r.usesDefaultKernel)
+         assertTrue(OneiosImageChoice.IOS_27.usesDefaultKernel)
+-        assertTrue(OneiosImageChoice.IOS_16_5_A56.usesDefaultKernel)
++        assertTrue(OneiosImageChoice.IOS_16_5.usesDefaultKernel)
+     }
+ 
+     /**
+diff --git a/app-android/core/root/src/main/kotlin/com/fahadali/oneos/core/root/OneiosMakeImage.kt b/app-android/core/root/src/main/kotlin/com/fahadali/oneos/core/root/OneiosMakeImage.kt
+index 4054ae9..f35b941 100644
+--- a/app-android/core/root/src/main/kotlin/com/fahadali/oneos/core/root/OneiosMakeImage.kt
++++ b/app-android/core/root/src/main/kotlin/com/fahadali/oneos/core/root/OneiosMakeImage.kt
+@@ -22,20 +22,22 @@ import com.fahadali.oneos.core.model.OneiosToolFlow
+  * 3. root's `begin image` (an empty `image.new` and its two empty lists);
+  * 4. the tool ([Io.openTool]); when its `hello` names no `make-image` (a runtime older than the tool's
+  *    `make-image`), the latest runtime once more when that is another version, else a refusal in plain words;
+- * 4b. only for a profile without a kernelcache member ([OneiosImageChoice.needsKernelcache]: the Galaxy A56's
+- *    iOS 16.5): Apple's 24A446 kernelcache into `kb/`, exactly as Update the kernel's step 2 gets it
++ * 4b. only for a profile without a kernelcache member ([OneiosImageChoice.needsKernelcache]: iOS 16.5): Apple's
++ *    24A446 kernelcache into `kb/`, exactly as Update the kernel's step 2 gets it
+  *    ([OneiosKernelUpdate.kernelcache]: nothing when root's `kb` line is the pin already, else `fetch`, `im4p`, the
+  *    pin check and root's `kbcache`). make-image prelinks the set's kernel.kc with those 24A446 kexts and refuses
+- *    without it. Every other phone (the S24 Ultra) skips it: its profile has the member, make-image decodes it;
++ *    without it. The iOS 27 profiles include their kernelcache, which make-image decodes;
+  * 5. the tool's `make-image` ([OneiosTool.makeImageRequest] with [image]'s profile): fetch from Apple, decrypt, the
+  *    volumes, the root tweaks, the seed, the kernelcache, the prelink with its audit, the manifest, verify, the
+  *    lists. It asks its room once (`space`) before it fetches or writes anything, can be paused, and removes what it
+  *    wrote when it stops; the fetched members stay in `make/inputs` for the next run;
+  * 6. root's `finish image <files> <format> <version> <build>` with those four fields of `make-image`'s `ok`.
+  *
+- * The tool's own `tweaks` request is not sent: `make-image` runs the root tweaks itself (its `tweaks` step). Nor is
++ * On the S24 Ultra's experimental iOS 16.5 image, `runtime_plugins=false` keeps the A56-only Xclipse sidecar out; the
++ * supported S24 iOS 27 and A56 iOS 16.5 paths retain the runtime's plug-ins. The tool's own `tweaks` request is not sent:
++ * `make-image` runs the root tweaks itself (its `tweaks` step). Nor is
+  * a `fetch` before it: `make-image` fetches, and its one room check and every refusal of its `check` step come before
+- * a byte is downloaded (a `fetch` first would download 11 GB before that check). The A56's step 4b fetches only the
++ * a byte is downloaded (a `fetch` first would download several GB before that check). The iOS 16.5 step 4b fetches only the
+  * 24A446 kernelcache member (about 23 MB), which the image's own profile does not have.
+  */
+ class OneiosMakeImage(
+@@ -44,10 +46,12 @@ class OneiosMakeImage(
+     /** The app's `kb/` files by name ([OneiosKbInput.NAMES]), as read from its assets. */
+     private val assets: Map<String, ByteArray>,
+     /**
+-     * Which image this phone makes (the user's pick of [OneiosImageChoice.choicesOf] its profile); iOS 27.0.1 by default, as
+-     * before. iOS 27.2.1 sends make-image its kernel ([Io.kernelPath]) and `kb-24B156` ([OneiosImageChoice.kb]).
++     * Which image this phone makes (the user's pick of [OneiosImageChoice.choicesOf] its profile). iOS 27.2.1 sends
++     * make-image its kernel ([Io.kernelPath]) and `kb-24B156` ([OneiosImageChoice.kb]).
+      */
+     private val image: OneiosImageChoice = OneiosImageChoice.IOS_27,
++    /** False only for the S24 Ultra's 20F66 image, which must not receive the A56 GPU sidecar. */
++    private val runtimePlugins: Boolean = true,
+ ) {
+     /** What the flow needs from the app: root, the release download, the tool, the screen, the user's Stop. */
+     interface Io {
+@@ -203,7 +207,9 @@ class OneiosMakeImage(
+         io.phase(Phase.BUILD)
+         // iOS 27.0.1 and the A56: the tool's defaults for the kernel and kb/, as before; iOS 27.2.1 names its own.
+         val xnu = if (image.usesDefaultKernel) null else io.kernelPath(st, image.kernelBuild) ?: return noBuildKernel(st.runtime?.version)
+-        val (cmd, keys) = OneiosTool.makeImageRequest(stage, image.profile, xnu, if (image.usesDefaultKernel) null else image.kb)
++        val (cmd, keys) = OneiosTool.makeImageRequest(
++            stage, image.profile, xnu, if (image.usesDefaultKernel) null else image.kb, runtimePlugins,
++        )
+         val made = io.tool(cmd, keys)
+         if (made.end != OneiosToolFlow.End.OK) {
+             return Outcome.Stopped(cmd, made.end ?: OneiosToolFlow.End.LOST, made.code, made.text, made.spaceNeed, made.spaceFree)
+diff --git a/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosMakeImageTest.kt b/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosMakeImageTest.kt
+index 652d76d..b3ad2b5 100644
+--- a/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosMakeImageTest.kt
++++ b/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosMakeImageTest.kt
+@@ -359,10 +359,10 @@ class OneiosMakeImageTest {
+         assertEquals(listOf("tool", "kbclean"), stop.asked.takeLast(2))
+     }
+ 
+-    /** The S24 Ultra's choice is today's: the same requests in the same order, never a kernelcache step, cached or not. */
++    /** iOS 27 remains an explicit S24 fallback with exactly its existing requests and no kernelcache fetch. */
+     @Test
+-    fun theS24UltrasChoiceSendsExactlyTodaysRequests() {
+-        val s24 = OneiosImageChoice.of(Profiles.S_ULTRA_8650)
++    fun theS24UltrasIos27FallbackSendsExactlyTodaysRequests() {
++        val s24 = OneiosImageChoice.of(Profiles.S_ULTRA_8650, "24A446")
+         assertEquals(OneiosImageChoice.IOS_27, s24)
+         for (st in listOf(withKernel, withKernel.copy(kb = OneiosStatus.Kb(kb.kernelcacheSha256, 12)))) {
+             val today = Fake(listOf(st), tools = listOf(withMake), makeImage = made)
+diff --git a/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosScriptTest.kt b/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosScriptTest.kt
+index 9d0a974..da3bb8d 100644
+--- a/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosScriptTest.kt
++++ b/app-android/core/root/src/test/kotlin/com/fahadali/oneos/core/root/OneiosScriptTest.kt
+@@ -665,18 +665,18 @@ class OneiosScriptTest {
+         assertSetHolds(f)
+     }
+ 
+-    /** An iOS 27 (24A446) set never runs the tool: the finish is today's, with no `a56-gpu` line. */
++    /** The S24's iOS 16.5 set must not receive the A56/Xclipse GPU addon. */
+     @Test
+-    fun anIos27SetNeverRunsTheGpuPlaceStep() = each { f ->
+-        val (_, bid) = a56Stage(f, "24A446")
++    fun anIos16SetOnS24NeverRunsTheA56GpuPlaceStep() = each { f ->
++        val (_, bid) = a56Stage(f, "20F66")
++        f.file("props").writeText("ro.product.model=SM-S928B\nro.product.device=e3q\nro.soc.model=SM8650\n")
+         val before = File(f.stage, "image/overlay/userland/owner-trust.json").readBytes()
+         val kc = ByteArray(6000) { (it % 227).toByte() }
+         gpuMode(f, "placed", 4)
+         makeKernelOut(f, kc, xnuShaOf(f), kcInShaOf(f))
+         val o = f.verb(OneiosRoot.Verb.FINISH, listOf("kernel", Hashes.sha256(kc), bid))
+         assertOk(o)
+-        assertEquals(o.text, emptyList<String>(), o.reply.results)
+-        assertTrue(o.text, o.text.lines().none { it.contains("a56") || it.contains("A56") })
++        assertEquals(listOf("a56-gpu none the A56 GPU addon is only enabled on the Galaxy A56; this host's GPU path is unchanged"), o.reply.results)
+         assertFalse(f.file("a56gpu/calls").exists())
+         assertFalse(File(f.stage, "image/kernel.kc.gpuaddon").exists())
+         assertTrue(before.contentEquals(File(f.stage, "image/overlay/userland/owner-trust.json").readBytes()))
+@@ -1102,6 +1102,7 @@ class OneiosScriptTest {
+      * set's kernel.kc and the runtime's kernel build id.
+      */
+     private fun a56Stage(f: Fake, build: String, addon: ByteArray? = null): Pair<ByteArray, String> {
++        f.file("props").writeText("ro.product.model=SM-A566B\nro.product.device=a56x\nro.soc.model=s5e8855\n")
+         val bid = "xnu-12377.121.6-ios-27.0.1-24A446-abcdef012345"
+         val xnu = ByteArray(100) { it.toByte() }
+         val tool = OneiosScriptTest::class.java.getResourceAsStream("/oneios/a56gpu-tool.sh")!!.readBytes()
+diff --git a/docs/oneios.md b/docs/oneios.md
+index ffac94b..268cccd 100644
+--- a/docs/oneios.md
++++ b/docs/oneios.md
+@@ -1,4 +1,4 @@
+-# iOS 27 (OneiOS)
++# OneiOS
+ 
+ A system kind of its own in this fork (`akshaynexus/OneOS`, branch `oneios`): Apple's iOS 27 as a OneOS-style
+ session on the Galaxy S24 Ultra. One UI's framework stops, and instead of another Android framework the session
+@@ -115,7 +115,7 @@ custom-ROM rule takes since 0.4.89), the Korean SM-S928N and the Chinese SM-S928
+ `ProfilesTest`, `OneiosScriptTest.theSwitchTakesEveryS24UltraModelAsTheTestedPhone`; only the B has run a session).
+ The Japanese S24 Ultras (SC-52E, SCG26) are not `SM-S928`: they are warned as another phone. On the S24 Ultra
+ the card is last in Choose a system, marked Experimental, and the switch needs a tick every time ("I understand
+-that iOS 27 (OneiOS) is experimental..."), like an untested profile. The owner (2026-11-16): every other phone
++that this OneiOS image is experimental..."), like an untested profile. The owner (2026-11-16): every other phone
+ is **warned, not refused** — the switch prints what to expect and goes on, the setup flows as usual, and the
+ switch's confirm has a third box ("mainly tested and working on the Galaxy S24 Ultra 5G (SM-S928B); on this
+ phone it may be unstable, miss pieces, or not come back to One UI"). A Samsung device is what the code is
+@@ -146,7 +146,7 @@ there · root allowed".
+ What it makes (`OneiosImageChoice.of`, `core/model/.../OneiosTool.kt`): on the A56, `IOS_16_5_A56`, the runtime's
+ `lib/profiles/ios-16.5-a56.toml` (iOS 16.5 20F66 from Apple's iPhone X IPSW; 11 members, 5,825,842,914 bytes to
+ download; about 24 GiB free room at the peak: the profile's `need_gib` of 20 and the seed, kernel.kc and the lists).
+-Every other phone, and a phone with no profile, `IOS_27` by default (or `IOS_27_2` by the user's pick: "iOS 27.2.1 (24B156)" below): exactly `IPSW_PROFILE`, `MAKE_IMAGE_DOWNLOAD_BYTES` and
++The S24 Ultra now gets `IOS_16_5` first, with both iOS 27 builds retained as fallbacks; every other phone, and a phone with no profile, keeps `IOS_27` by default (or `IOS_27_2` by the user's pick): exactly `IPSW_PROFILE`, `MAKE_IMAGE_DOWNLOAD_BYTES` and
+ `MAKE_IMAGE_ROOM_BYTES`, as before. That profile has no kernelcache member: the set's kernel.kc is OneiOS's XNU
+ prelinked with the iPhone18,2 24A446 kexts, so Make iOS image puts Apple's 24A446 kernelcache into `kb/` first
+ (step 4b of "Make iOS image (no PC)"). Update the kernel keeps the 27.0.1 profile on every phone.
+@@ -196,23 +196,38 @@ the iPhone18,2 24A446 kexts, and Make iOS image prelinks it from the same inputs
+ `OneiosManifests.updateProblem` and `kernelProblem` now compare `OneiosImageChoice.kernelBuildOf(image build)`
+ (24A446 for 20F66, else the build itself) with the inputs' build. The page also said "iOS 27" over the 16.5 set: the
+ title, the Switch button and the switching line now name the staged set's iOS (`OneiosSystem.shortName`/`name`:
+-"iOS 16.5 (OneiOS)", "Switch to iOS 16.5"), and the iOS 27 artwork shows only over an iOS 27 set or none. The
+-system's card and its id stay "iOS 27 (OneiOS)". Tested: `OneiosTest.theA56s165SetTakesThe24A446Kernel`,
++"iOS 16.5 (OneiOS)", "Switch to iOS 16.5"), and the iOS 27 artwork shows only over an iOS 27 set or none.
++The card uses the generic OneiOS name; its internal system id remains `oneios-ios27`. Tested: `OneiosTest.theA56s165SetTakesThe24A446Kernel`,
+ `theNameFollowsTheStagedSet`; not run on an A56.
+ 
++### Experimental iOS 16.5 on the Galaxy S24 Ultra
++
++On branch `codex/s24u-ios16`, Make iOS image offers iOS 16.5 (20F66) first for the S24 Ultra, followed by the existing
++iOS 27 builds as fallbacks. This reuses the already pinned iPhone X source profile `ios-16.5-a56.toml`; it does not add
++a separate S24 IPSW profile. The image remains iPhone X userland with OneiOS's XNU prelinked against the iPhone18,2
++24A446 kexts. It is experimental and has not been boot-tested on an S24 Ultra. The switch warns about that and keeps the
++existing One UI return controls.
++
++The S24's 20F66 Make iOS image request sends the runtime's supported `runtime_plugins=false` option. That keeps the
++A56's Xclipse Metal/OpenGL sidecar and other runtime plug-ins out of this image; the A56's 20F66 path and the S24's
++iOS 27 plug-in path keep their existing behavior. The separate kernel activation step also places the A56 sidecar only
++when the host matches the A56 model, device and SoC. This S24 iOS 16.5 path therefore has no Metal plug-in today:
++the existing S24 `NativeAdrenoMetal` is built for iOS 27 arm64e, while the iOS 16.5 A56 plug-in uses a different GPU
++backend. Supporting S24 Metal on 20F66 needs a separately built and validated arm64 iOS 16.5 plug-in for that image.
+ It is not an `ImageRef`: it has no Android SDK, no `system.raw`, no package set and no guard jars, so none of the
+ Android guests' tables, pins or tests know it.
+ 
+ ### iOS 27.2.1 (24B156): a second build to choose (new, not booted yet)
+ 
+-**Make iOS image offers two iOS 27 builds** (the owner, 2026-11-25) on every phone it offers iOS 27 on (the S24 Ultra
+-and every other profile but the Galaxy A56, which stays iOS 16.5 only; `OneiosSystem.PROFILE_IDS` itself is
+-unchanged: today the S24 Ultra and the A56): **"iOS 27.0.1 (24A446), tested"**, first and recommended, and **"iOS
+-27.2.1 (24B156), new: not booted yet"**, the build Apple signs now. `OneiosImageChoice.choicesOf(profile)`
++**Make iOS image keeps both iOS 27 builds available** (the owner, 2026-11-25): iOS 27.0.1 (24A446) and iOS
++27.2.1 (24B156) remain available on phones that offer iOS 27. On the S24 Ultra they follow the experimental iOS
++16.5 default; the A56 still offers only iOS 16.5, and other profiles keep their existing iOS 27 default. The
++iOS 27.0.1 choice is marked tested, and iOS 27.2.1 is marked new: not booted yet. The runtime profiles are
++unchanged, as is the `OneiosSystem.PROFILE_IDS` set (the S24 Ultra and the A56). `OneiosImageChoice.choicesOf(profile)`
+ (`core/model/.../OneiosTool.kt`) lists them; `IOS_27_2` is the runtime's `lib/profiles/ios-27.2.1-iPhone18-2.toml`
+ (OneiOS's `profiles/ios-27.2.1-iPhone18,2.toml`, on OneiOS branch `ios272/base` until it merges), 11,718,249,424
+ bytes to download (its 13 members, 10.91 GiB) and about 36 GiB of room at the peak (its `need_gib` of 32 and the same
+-4 GiB beside it as 24A446's 30 + 4). 27.0.1 stays first until a phone boot of 27.2.1 passes
++4 GiB beside it as 24A446's 30 + 4). Within the iOS 27 fallback choices, 27.0.1 stays first until a phone boot of 27.2.1 passes
+ (`OneiosImageChoice.NOT_BOOTED`, the label's note): that is only the order and the words, not a block.
+ 
+ - **The pick** (`OneiosActions.makeImage`): with more than one choice, a list first, "Which iOS should this phone
+diff --git a/switcher/assets/oneios_switch.sh b/switcher/assets/oneios_switch.sh
+index a39fb5c..5fc4ada 100644
+--- a/switcher/assets/oneios_switch.sh
++++ b/switcher/assets/oneios_switch.sh
+@@ -1620,6 +1620,11 @@ if [ "$A56" = 1 ] && [ "$I_BUILD" != 20F66 ]; then
+     echo "WARNING: the staged image is iOS ${I_VERSION:-?} (${I_BUILD:-?}), not iOS 16.5 (20F66): iOS 27 has no GPU"
+     echo "WARNING: path on the Galaxy A56, so it may not draw. Make iOS image on this phone makes iOS 16.5."
+ fi
++if [ "$S24U" = 0 ] && [ "$I_BUILD" = 20F66 ]; then
++    echo "WARNING: iOS 16.5 (20F66) has not been boot-tested on the Galaxy S24 Ultra in this branch."
++    echo "WARNING: it uses the iPhone X userland with the OneiOS 24A446 kernel and must not use the A56 GPU addon."
++    echo "WARNING: if the guest does not start, use the listed return controls to restore One UI."
++fi
+ 
+ # Root tools: the root manager's own busybox and resetprop, as oneos_switch.sh.
+ BB=""
