@@ -2053,7 +2053,7 @@ pub fn ios16_enable_adreno_metal(args: &mut String, size: usize) -> Result<bool,
     let found = args.match_indices(key).find(|(at, name)| {
         let before_ok = *at == 0 || args.as_bytes()[at - 1].is_ascii_whitespace();
         let after = args.as_bytes().get(*at + name.len());
-        before_ok && after.map_or(true, |c| *c == b'=' || c.is_ascii_whitespace())
+        before_ok && after.is_none_or(|c| *c == b'=' || c.is_ascii_whitespace())
     });
     if let Some((start, name)) = found {
         let tail = &args[start + name.len()..];
