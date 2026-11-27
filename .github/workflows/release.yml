@@ -9,9 +9,9 @@
 #
 # apk-macos waits for metal because both jobs use the limited xcode-27 runner pool.
 #
-# Triggers: a pull request or a push builds the applicable products and releases nothing. When only the app/ submodule
-# pointer plus this CI planner/docs change, CI skips the runtime and its Metal build (the runtime job never checks out
-# app/), while still building and testing the APK. A tag vN.N.N[-suffix] on main builds
+# Triggers: a pull request or a push to main / codex/s24u-ios16 builds the applicable products and releases nothing.
+# The S24 iOS 16.5 branch builds the runtime without guest Metal plug-ins, plus the APK. Other runtime builds include
+# Metal. A tag vN.N.N[-suffix] on main builds
 # both and releases both. A dispatch (Actions, "build and release", Run workflow) on main takes a version,
 # "both", "runtime only" or "apk only", and optionally a successful `metal-plugin` run ID to reuse.
 # The runtime job never checks out app/: the fork's tree cannot reach the package. Nothing of Apple's, Samsung's,
@@ -21,7 +21,7 @@ name: build and release
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, codex/s24u-ios16]
     tags: ['v*']
   workflow_dispatch:
     inputs:
@@ -54,6 +54,7 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       runtime: ${{ steps.plan.outputs.runtime }}
       apk: ${{ steps.plan.outputs.apk }}
+      metal: ${{ steps.plan.outputs.metal }}
       metal_run_id: ${{ steps.plan.outputs.metal_run_id }}
     permissions:
       actions: read
@@ -68,6 +69,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
           REF_NAME: ${{ github.ref_name }}
+          BASE_REF: ${{ github.base_ref }}
           IN_VERSION: ${{ inputs.version }}
           IN_BUILD: ${{ inputs.build }}
           IN_METAL_RUN_ID: ${{ inputs.metal_run_id }}
@@ -75,7 +77,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          release=false version=0.0.0-ci runtime=true apk=true metal_run_id=$IN_METAL_RUN_ID
+          release=false version=0.0.0-ci runtime=true apk=true metal=true metal_run_id=$IN_METAL_RUN_ID
           if [ "$EVENT" = push ] && [[ $REF == refs/tags/* ]]; then
             release=true version=${REF_NAME#v}
           elif [ "$EVENT" = workflow_dispatch ]; then
@@ -83,33 +85,12 @@ jobs:
             case "$IN_BUILD" in both) ;; "runtime only") apk=false ;; "apk only") runtime=false ;;
               *) echo "::error::build '$IN_BUILD' is not both, runtime only or apk only"; exit 1 ;; esac
           fi
-          # The runtime workflow never checks out app/: an app-only submodule update cannot change its package.
-          # Allow this workflow's planner and documentation alongside the app pointer; any other changed path keeps
-          # the full runtime/Metal validation. Explicit workflow_dispatch choices and tagged releases are untouched.
-          if [ "$EVENT" = pull_request ] || { [ "$EVENT" = push ] && [ "$release" = false ]; }; then
-            base= head=
-            if [ "$EVENT" = pull_request ]; then
-              base=$(jq -r '.pull_request.base.sha // empty' "$GITHUB_EVENT_PATH")
-              head=$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH")
-            else
-              base=$(jq -r '.before // empty' "$GITHUB_EVENT_PATH")
-              head=$GITHUB_SHA
-            fi
-            if [[ "$base" =~ ^[0-9a-f]{40}$ && "$head" =~ ^[0-9a-f]{40}$ ]] && [ "$base" != "0000000000000000000000000000000000000000" ]; then
-              changed=$(git diff --name-only --no-renames "$base" "$head")
-              app_changed=false runtime_input_changed=false
-              while IFS= read -r path; do
-                case "$path" in
-                  app) app_changed=true ;;
-                  .github/workflows/release.yml|docs/releases.md) ;;
-                  *) runtime_input_changed=true ;;
-                esac
-              done <<< "$changed"
-              if [ "$app_changed" = true ] && [ "$runtime_input_changed" = false ]; then
-                runtime=false
-                echo "Only the app submodule and its CI planner/docs changed; skipping the runtime and Metal build. APK CI remains enabled."
-              fi
-            fi
+          # S24 iOS 16.5 is an arm64 image and has no compatible S24 Metal plug-in yet. Build and upload this branch's
+          # runtime without guest plug-ins so it can be tested with the APK; keep Metal enabled for other targets.
+          if { [ "$EVENT" = push ] && [ "$REF_NAME" = codex/s24u-ios16 ]; } ||
+             { [ "$EVENT" = pull_request ] && [ "$BASE_REF" = codex/s24u-ios16 ]; }; then
+            metal=false
+            echo "S24 iOS 16.5 branch: runtime and APK enabled; incompatible Metal plug-in build disabled."
           fi
           if [ -n "$metal_run_id" ]; then
             [ "$EVENT" = workflow_dispatch ] || { echo "::error::metal_run_id is only accepted on a workflow dispatch"; exit 1; }
@@ -135,12 +116,13 @@ jobs:
             echo "release $REF_NAME exists already (published from a machine): this run builds and tests only"
             release=false
           fi
-          echo "release=$release version=$version runtime=$runtime apk=$apk"
-          { echo "release=$release"; echo "version=$version"; echo "runtime=$runtime"; echo "apk=$apk"; echo "metal_run_id=$metal_run_id"; } >> "$GITHUB_OUTPUT"
+          [ "$runtime" = true ] || metal=false
+          echo "release=$release version=$version runtime=$runtime apk=$apk metal=$metal"
+          { echo "release=$release"; echo "version=$version"; echo "runtime=$runtime"; echo "apk=$apk"; echo "metal=$metal"; echo "metal_run_id=$metal_run_id"; } >> "$GITHUB_OUTPUT"
 
   metal:
     needs: plan
-    if: needs.plan.outputs.runtime == 'true' && needs.plan.outputs.metal_run_id == ''
+    if: needs.plan.outputs.runtime == 'true' && needs.plan.outputs.metal == 'true' && needs.plan.outputs.metal_run_id == ''
     uses: ./.github/workflows/metal-plugin.yml
     with:
       target: 'iPhone18,2 24A446'
@@ -149,7 +131,7 @@ jobs:
     needs: [plan, metal]
     if: >-
       always() && needs.plan.outputs.runtime == 'true' &&
-      (needs.metal.result == 'success' || needs.plan.outputs.metal_run_id != '')
+      (needs.metal.result == 'success' || needs.plan.outputs.metal == 'false' || needs.plan.outputs.metal_run_id != '')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -198,10 +180,14 @@ jobs:
           set -euo pipefail
           scripts/setup/get-references.sh virglrenderer
           test -f external/virglrenderer/src/drm/drm2kgsl/drm2kgsl_renderer.c || { echo "virglrenderer checkout has no drm2kgsl"; exit 1; }
-      - name: Pinned source licences for the guest plug-ins
+      - name: Pinned kernel source
         run: |
           set -euo pipefail
           kernel/fetch.sh Droid-VM-UniXNU
+      - name: Pinned source licences for the guest plug-ins
+        if: needs.plan.outputs.metal == 'true'
+        run: |
+          set -euo pipefail
           scripts/setup/get-references.sh NativeMetal NativeAdreno NativeMobileDisplay AdrenoPM4 metal2vulkan mesa-droidvm
       - name: Host tests
         run: |
@@ -232,6 +218,7 @@ jobs:
           echo "$ksha  $(ls out/kernel/dl/xnu-*.tar.zst)" | sha256sum -c -
           zstd -dc out/kernel/dl/xnu-*.tar.zst | tar -x -C out/kernel/current
       - name: Download the Metal and capture plug-ins
+        if: needs.plan.outputs.metal == 'true'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: NativeAdrenoMetal
@@ -239,6 +226,7 @@ jobs:
           run-id: ${{ needs.plan.outputs.metal_run_id || github.run_id }}
           github-token: ${{ github.token }}
       - name: Verify the selected Metal artifact target
+        if: needs.plan.outputs.metal == 'true'
         run: |
           set -euo pipefail
           bundle=out/metal-guest/NativeAdrenoMetal.bundle
@@ -257,10 +245,10 @@ jobs:
           chmod 0755 "$bundle/NativeAdrenoMetal" out/metal-guest/camera/H9ISP.mediacapture
       - name: Package (refuses Apple files and what Android cannot load)
         env:
-          METAL_DIR: out/metal-guest
-          CAMERA_DIR: out/metal-guest/camera
-          ONEIOS_GPUADDON: out/metal-guest/NativeAdrenoMetal.gpuaddon
-          REQUIRE_METAL: '1'
+          METAL_DIR: ${{ needs.plan.outputs.metal == 'true' && 'out/metal-guest' || '' }}
+          CAMERA_DIR: ${{ needs.plan.outputs.metal == 'true' && 'out/metal-guest/camera' || '' }}
+          ONEIOS_GPUADDON: ${{ needs.plan.outputs.metal == 'true' && 'out/metal-guest/NativeAdrenoMetal.gpuaddon' || '' }}
+          REQUIRE_METAL: ${{ needs.plan.outputs.metal == 'true' && '1' || '0' }}
         run: runtime/package.sh "$VERSION"
       - name: The package's xnuhost and gpuctl have drm2kgsl
         run: |
@@ -286,12 +274,17 @@ jobs:
           ( cd out/release && sha256sum -c "$(basename "$a").sha256" )
           zstd -dc "$a" | tar -t | tee members.txt | grep -Ev '^(runtime\.json|NOTICE|LICENSE|(bin|lib|scripts)/[^/].*|kernel/([0-9A-Z]+/)?xnu\.macho(\.build\.json)?|kernel/gpuaddon(\.cdhashes)?)$' && { echo "::error::the package has members outside the runtime's folders (above)"; exit 1; }
           [ "$(head -n 1 members.txt)" = runtime.json ] || { echo "::error::runtime.json is not the first member"; exit 1; }
-          grep -qx 'lib/guest/NativeAdrenoMetal.bundle/NativeAdrenoMetal' members.txt || { echo "::error::runtime has no Metal executable"; exit 1; }
-          grep -qx 'lib/guest/camera/H9ISP.mediacapture' members.txt || { echo "::error::runtime has no capture plug-in"; exit 1; }
-          grep -qx 'kernel/gpuaddon' members.txt || { echo "::error::runtime has no packaged GPU boot add-on"; exit 1; }
-          grep -qx 'kernel/gpuaddon.cdhashes' members.txt || { echo "::error::runtime has no GPU add-on trust hashes"; exit 1; }
           zstd -dc "$a" | tar -xO runtime.json > runtime.json
-          jq -e '.metal.target == "iPhone18,2 24A446" and .camera.path == "lib/guest/camera"' runtime.json >/dev/null || { echo "::error::runtime manifest does not name the expected Metal and camera plug-ins"; exit 1; }
+          if [ "${{ needs.plan.outputs.metal }}" = true ]; then
+            grep -qx 'lib/guest/NativeAdrenoMetal.bundle/NativeAdrenoMetal' members.txt || { echo "::error::runtime has no Metal executable"; exit 1; }
+            grep -qx 'lib/guest/camera/H9ISP.mediacapture' members.txt || { echo "::error::runtime has no capture plug-in"; exit 1; }
+            grep -qx 'kernel/gpuaddon' members.txt || { echo "::error::runtime has no packaged GPU boot add-on"; exit 1; }
+            grep -qx 'kernel/gpuaddon.cdhashes' members.txt || { echo "::error::runtime has no GPU add-on trust hashes"; exit 1; }
+            jq -e '.metal.target == "iPhone18,2 24A446" and .camera.path == "lib/guest/camera"' runtime.json >/dev/null || { echo "::error::runtime manifest does not name the expected Metal and camera plug-ins"; exit 1; }
+          else
+            if grep -Eq '^(lib/guest/|kernel/gpuaddon)' members.txt; then echo "::error::no-Metal runtime unexpectedly contains guest plug-ins"; exit 1; fi
+            jq -e '.metal == null and .camera == null and (.metals | length == 0) and (.cameras | length == 0)' runtime.json >/dev/null || { echo "::error::no-Metal runtime manifest unexpectedly names guest plug-ins"; exit 1; }
+          fi
           echo "$(wc -l < members.txt) members, runtime.json first"
       - name: The phone's oneios-tool is the package's bin/oneios-tool, stripped, with its .sha256
         # runtime/package.sh builds tools/oneios-tool for aarch64-linux-android into bin/oneios-tool and writes the
