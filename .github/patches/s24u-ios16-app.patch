@@ -74,7 +74,7 @@ index b7c4813..07a2408 100644
  import com.fahadali.oneos.core.model.OneiosSystem
  import com.fahadali.oneos.core.model.OneiosTool
  import com.fahadali.oneos.core.model.OneiosToolFlow
-@@ -370,13 +371,17 @@ object OneiosToolJob : BackgroundJob<OneiosToolJob.State>(State(), "oneos-oneios
+@@ -370,13 +371,15 @@ object OneiosToolJob : BackgroundJob<OneiosToolJob.State>(State(), "oneos-oneios
       * Make iOS image ([OneiosMakeImage] decides the order): root's steps on their own `su`, the latest runtime by
       * [OneiosJob.stageLatestForMakeImage] (no tool session is open then), each tool request shown as any flow's.
       * [first] is the status [work] read (it installed this build's root script); [build] the user's pick
@@ -87,22 +87,14 @@ index b7c4813..07a2408 100644
 -        // The image this phone makes: the user's pick of the phone's choices (iOS 27.0.1 or 27.2.1; iOS 16.5 on the
 -        // Galaxy A56, untested there).
 -        val image = OneiosImageChoice.of(OneiosJob.phoneProfile(app), build)
-+        // The S24 Ultra's new 20F66 path reuses the A56's pinned iPhone X image source. Host-specific GPU add-ons are
-+        // guarded when the kernel is activated, so the image request stays on the runtime's documented contract.
++        // The S24's 20F66 image has a matching ARM64 Metal bundle in the staged runtime; make-image selects by target.
++        // The separate A56 Xclipse sidecar remains gated by the host's model, device and SoC.
 +        val profile = OneiosJob.phoneProfile(app)
 +        val image = OneiosImageChoice.of(profile, build)
-+        val isS24Ios16 = profile?.id == Profiles.ID_S_ULTRA_8650 && image.build == OneiosImageChoice.IOS_16_5.build
-+        val runtimePlugins = !isS24Ios16
          val kb = try {
              OneiosJob.kbInputs(app, image.kernelBuild)
          } catch (e: OneiosJob.NoKb) {
-@@ -462,7 +467,7 @@ object OneiosToolJob : BackgroundJob<OneiosToolJob.State>(State(), "oneos-oneios
-             override val stopped: Boolean get() = stop
-         }
-         try {
--            return when (val o = OneiosMakeImage(S, kb, assets, image).run(io)) {
-+            return when (val o = OneiosMakeImage(S, kb, assets, image, runtimePlugins).run(io)) {
-                 is OneiosMakeImage.Outcome.Staged -> {
+
                      update(state.copy(
                          results = state.results + "iOS ${o.version} (${o.build}) is staged: ${o.files} files${o.bytes?.let { ", ${Units.bytes(it)}" }.orEmpty()}.",
 diff --git a/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosActions.kt b/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosActions.kt
@@ -391,8 +383,8 @@ index 86a669c..1025ddd 100644
 -     * the next run (the tool's default too; sent so that it does not depend on one).
 +     * `xnu` (`runtime.json`'s `kernel.path`), `kb` (`<stage>/kb`), `tweaks` (true): iOS 27.0.1 and iOS 16.5 send none
 +     * of them; iOS 27.2.1 sends [xnu] (the runtime's `kernels[]` path of 24B156, stage-relative under `runtime/`)
-+     * and [kb] (`kb-24B156`). `runtime_plugins` is omitted by default; on the S24 Ultra's experimental 20F66 build it
-+     * is explicitly false so the make-image tool leaves out every runtime plug-in, including the A56-only GPU sidecar.
++     * and [kb] (`kb-24B156`). `runtime_plugins` is omitted by default, letting make-image select staged plug-ins by
++     * target. The separate `metal_a56` sidecar is applied only for a matching A56 host.
 +     * `resume`: a stop, a lost network or an ended app keep the fetch's parts for the next run (the tool's default too;
 +     * sent so that it does not depend on one).
       */
@@ -609,8 +601,8 @@ index 0ecc109..5d975c9 100644
          assertEquals("$s/runtime/lib/profiles/ios-16.5-a56.toml", OneiosTool.makeImageRequest(s, a56.profile).second["profile"])
 -        assertEquals(OneiosTool.makeImageRequest(s), OneiosTool.makeImageRequest(s, OneiosImageChoice.of(Profiles.S_ULTRA_8650).profile))
 +        assertEquals("$s/runtime/lib/profiles/ios-16.5-a56.toml", OneiosTool.makeImageRequest(s, s24.let { OneiosImageChoice.of(it).profile }).second["profile"])
-+        val s24Request = OneiosTool.makeImageRequest(s, OneiosImageChoice.IOS_16_5.profile, runtimePlugins = false).second
-+        assertEquals(false, s24Request["runtime_plugins"])
++        val s24Request = OneiosTool.makeImageRequest(s, OneiosImageChoice.IOS_16_5.profile).second
++        assertFalse("runtime_plugins" in s24Request)
 +        assertFalse("runtime_plugins" in OneiosTool.makeImageRequest(s).second)
 +        assertEquals(OneiosTool.makeImageRequest(s), OneiosTool.makeImageRequest(s, OneiosImageChoice.IOS_27.profile))
          assertEquals(
@@ -692,8 +684,8 @@ index 4054ae9..f35b941 100644
   * 6. root's `finish image <files> <format> <version> <build>` with those four fields of `make-image`'s `ok`.
   *
 - * The tool's own `tweaks` request is not sent: `make-image` runs the root tweaks itself (its `tweaks` step). Nor is
-+ * On the S24 Ultra's experimental iOS 16.5 image, `runtime_plugins=false` keeps the A56-only Xclipse sidecar out; the
-+ * supported S24 iOS 27 and A56 iOS 16.5 paths retain the runtime's plug-ins. The tool's own `tweaks` request is not sent:
++ * On the S24 Ultra's iOS 16.5 image, the staged runtime's Metal bundle is selected only when its target matches 20F66.
++ * The separate A56 Xclipse sidecar is selected only for its supported host. The tool's own `tweaks` request is not sent:
 + * `make-image` runs the root tweaks itself (its `tweaks` step). Nor is
   * a `fetch` before it: `make-image` fetches, and its one room check and every refusal of its `check` step come before
 - * a byte is downloaded (a `fetch` first would download 11 GB before that check). The A56's step 4b fetches only the
@@ -711,7 +703,7 @@ index 4054ae9..f35b941 100644
 +     * make-image its kernel ([Io.kernelPath]) and `kb-24B156` ([OneiosImageChoice.kb]).
       */
      private val image: OneiosImageChoice = OneiosImageChoice.IOS_27,
-+    /** False only for the S24 Ultra's 20F66 image, which must not receive the A56 GPU sidecar. */
++    /** Default true: let make-image select only the staged plug-ins matching this image's target. */
 +    private val runtimePlugins: Boolean = true,
  ) {
      /** What the flow needs from the app: root, the release download, the tool, the screen, the user's Stop. */
@@ -883,12 +875,11 @@ index ffac94b..268cccd 100644
 +24A446 kexts. It is experimental and has not been boot-tested on an S24 Ultra. The switch warns about that and keeps the
 +existing One UI return controls.
 +
-+The S24's 20F66 Make iOS image request sends the runtime's supported `runtime_plugins=false` option. That keeps the
-+A56's Xclipse Metal/OpenGL sidecar and other runtime plug-ins out of this image; the A56's 20F66 path and the S24's
-+iOS 27 plug-in path keep their existing behavior. The separate kernel activation step also places the A56 sidecar only
-+when the host matches the A56 model, device and SoC. This S24 iOS 16.5 path therefore has no Metal plug-in today:
-+the existing S24 `NativeAdrenoMetal` is built for iOS 27 arm64e, while the iOS 16.5 A56 plug-in uses a different GPU
-+backend. Supporting S24 Metal on 20F66 needs a separately built and validated arm64 iOS 16.5 plug-in for that image.
++The S24's 20F66 Make iOS image request leaves `runtime_plugins` at its default, so make-image considers the staged
++runtime's target-specific Metal bundle. This branch's verified ARM64 `NativeAdrenoMetal` targets `iPhone10,3 20F66`,
++and is selected only for that image. The S24's iOS 27 fallback won't select this 20F66 bundle; it uses only a matching
++runtime target. The A56's Xclipse sidecar remains separate and is placed only when the host matches the A56 model,
++device and SoC. This S24 iOS 16.5 path remains experimental and has not been boot-tested on an S24 Ultra.
  It is not an `ImageRef`: it has no Android SDK, no `system.raw`, no package set and no guard jars, so none of the
  Android guests' tables, pins or tests know it.
  
