@@ -74,7 +74,7 @@ index b7c4813..07a2408 100644
  import com.fahadali.oneos.core.model.OneiosSystem
  import com.fahadali.oneos.core.model.OneiosTool
  import com.fahadali.oneos.core.model.OneiosToolFlow
-@@ -370,15 +371,17 @@ object OneiosToolJob : BackgroundJob<OneiosToolJob.State>(State(), "oneos-oneios
+@@ -370,13 +371,15 @@ object OneiosToolJob : BackgroundJob<OneiosToolJob.State>(State(), "oneos-oneios
       * Make iOS image ([OneiosMakeImage] decides the order): root's steps on their own `su`, the latest runtime by
       * [OneiosJob.stageLatestForMakeImage] (no tool session is open then), each tool request shown as any flow's.
       * [first] is the status [work] read (it installed this build's root script); [build] the user's pick
@@ -94,9 +94,6 @@ index b7c4813..07a2408 100644
          val kb = try {
              OneiosJob.kbInputs(app, image.kernelBuild)
          } catch (e: OneiosJob.NoKb) {
-
-                     update(state.copy(
-                         results = state.results + "iOS ${o.version} (${o.build}) is staged: ${o.files} files${o.bytes?.let { ", ${Units.bytes(it)}" }.orEmpty()}.",
 diff --git a/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosActions.kt b/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosActions.kt
 index 431cbed..d36f55b 100644
 --- a/app-android/app/src/full/kotlin/com/fahadali/oneos/ui/OneiosActions.kt
