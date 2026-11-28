@@ -899,7 +899,9 @@ impl Session {
                     Some(Ok(())) => {
                         match config::ios16_enable_adreno_metal(&mut config.boot_args, config::BOOT_ARGS_SIZE) {
                             Ok(true) => logi!("ios16: S24 Ultra: enabled the iPhone X 20F66 Adreno Metal accelerator"),
-                            Ok(false) => logi!("ios16: S24 Ultra: the iPhone X 20F66 Adreno Metal accelerator is already enabled"),
+                            Ok(false) => logi!(
+                                "ios16: S24 Ultra: the iPhone X 20F66 Adreno Metal accelerator is already enabled"
+                            ),
                             Err(_) => {
                                 loge!("ios16: S24 Ultra: no room to enable the Adreno Metal accelerator");
                                 return Err(BootFailed);
