@@ -74,7 +74,7 @@ index b7c4813..07a2408 100644
  import com.fahadali.oneos.core.model.OneiosSystem
  import com.fahadali.oneos.core.model.OneiosTool
  import com.fahadali.oneos.core.model.OneiosToolFlow
-@@ -370,13 +371,15 @@ object OneiosToolJob : BackgroundJob<OneiosToolJob.State>(State(), "oneos-oneios
+@@ -370,15 +371,17 @@ object OneiosToolJob : BackgroundJob<OneiosToolJob.State>(State(), "oneos-oneios
       * Make iOS image ([OneiosMakeImage] decides the order): root's steps on their own `su`, the latest runtime by
       * [OneiosJob.stageLatestForMakeImage] (no tool session is open then), each tool request shown as any flow's.
       * [first] is the status [work] read (it installed this build's root script); [build] the user's pick
@@ -857,7 +857,7 @@ index ffac94b..268cccd 100644
  `MAKE_IMAGE_ROOM_BYTES`, as before. That profile has no kernelcache member: the set's kernel.kc is OneiOS's XNU
  prelinked with the iPhone18,2 24A446 kexts, so Make iOS image puts Apple's 24A446 kernelcache into `kb/` first
  (step 4b of "Make iOS image (no PC)"). Update the kernel keeps the 27.0.1 profile on every phone.
-@@ -196,23 +196,38 @@ the iPhone18,2 24A446 kexts, and Make iOS image prelinks it from the same inputs
+@@ -196,23 +196,37 @@ the iPhone18,2 24A446 kexts, and Make iOS image prelinks it from the same inputs
  `OneiosManifests.updateProblem` and `kernelProblem` now compare `OneiosImageChoice.kernelBuildOf(image build)`
  (24A446 for 20F66, else the build itself) with the inputs' build. The page also said "iOS 27" over the 16.5 set: the
  title, the Switch button and the switching line now name the staged set's iOS (`OneiosSystem.shortName`/`name`:
