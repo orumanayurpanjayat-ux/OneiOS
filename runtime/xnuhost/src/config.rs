@@ -2046,8 +2046,9 @@ pub fn ios16_boot_args(args: &mut String, size: usize) -> Result<String, NoRoom>
 
 /// Make the 20F66 guest publish the S24 Ultra's Adreno Metal accelerator. The image's generic iOS 16.5
 /// configuration disables the Adreno accelerator for the A56; on the S24 the host renderer is KGSL and the
-/// iPhone X-targeted NativeAdrenoMetal bundle speaks its virtio-GPU user client. An explicit runtime `boot-args`
-/// setting is left to the caller. Returns whether this changed or added the boot argument.
+/// iPhone X-targeted NativeAdrenoMetal bundle speaks its virtio-GPU user client. An explicit runtime
+/// `oneios-gpu-metal=0` setting is left to the caller; a custom boot-args line without that switch still auto-enables.
+/// Returns whether this changed or added the boot argument.
 pub fn ios16_enable_adreno_metal(args: &mut String, size: usize) -> Result<bool, NoRoom> {
     let key = "oneios-gpu-metal";
     let found = args.match_indices(key).find(|(at, name)| {

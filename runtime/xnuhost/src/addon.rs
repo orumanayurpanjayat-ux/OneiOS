@@ -4,10 +4,10 @@
 //! lists. The kernel writes its files into the Data store and mounts them over the sealed system's folders before
 //! launchd starts (hosted 0031, 0056, 0090).
 //!
-//! The image set's own sidecar (`<kernel>.gpuaddon`, staged by `oneios-tool phone addon`) is the one a phone chose, and
-//! it wins (session/board.rs). The runtime's is the fallback, so a plug-in reaches the guest with the runtime alone — no
-//! adb, no image rebuild — and its CDHashes join the trust cache this boot gives the kernel: an image built without the
-//! plug-in has no owner module that names it (`overlay/userland/owner-trust.json`).
+//! The image set's own sidecar (`<kernel>.gpuaddon`, staged by `oneios-tool phone addon`) normally wins. For the
+//! S24 Ultra's iOS 16.5 (20F66) guest, a valid runtime add-on tagged `iPhone10,3 20F66` takes priority so an older
+//! image-side Metal bundle cannot shadow the matching plug-in. Its CDHashes join the trust cache this boot gives the
+//! kernel: an image built without the plug-in has no owner module that names it (`overlay/userland/owner-trust.json`).
 
 use xh_core::bytes::le;
 use xh_core::{loge, logi};
